@@ -8,6 +8,8 @@
 - Internet access during initial documentation and model download
 - Approximately 500 MB to 1 GB of free cache space for a full family
 
+On supported Windows x64 and Node.js versions, npm downloads the prebuilt SQLite native binary automatically. Visual Studio C++ Build Tools and Python are only needed when a compatible binary is unavailable or cannot be downloaded.
+
 ## Install
 
 ```bash

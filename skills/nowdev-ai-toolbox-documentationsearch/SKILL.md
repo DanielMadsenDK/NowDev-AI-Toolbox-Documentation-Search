@@ -1,5 +1,5 @@
 ---
-name: documentationsearch
+name: nowdev-ai-toolbox-documentationsearch
 description: Search, retrieve, initialize, and update locally indexed ServiceNow documentation with the DocumentationSearch CLI or MCP tools. Use for questions about ServiceNow APIs, scripting, product behavior, release-specific documentation, method signatures, parameters, examples, or documentation availability.
 ---
 
@@ -25,11 +25,7 @@ documentationsearch --json status
 documentationsearch --json search "GlideRecord query records" --family australia
 ```
 
-If the package is not installed globally, substitute:
-
-```bash
-npx -y @nowdevaitoolbox/documentationsearch --json status
-```
+Assume the npm-installed `@nowdevaitoolbox/documentationsearch` package is available globally and use the `documentationsearch` command directly.
 
 ## Search workflow
 
@@ -45,13 +41,15 @@ npx -y @nowdevaitoolbox/documentationsearch --json status
    documentationsearch --json search "natural-language query" --family australia --limit 10
    ```
 
-3. Use the best result's exact `sourcePath` to inspect its structure:
+   If the requested release is not indexed, inform the user which releases are available, ask whether to proceed with the closest available release or initialize the requested one, and do not guess at release-specific behavior.
+
+3. Use the highest-similarity result's exact `sourcePath` to inspect its structure:
 
    ```bash
    documentationsearch --json get "SOURCE_PATH" --family australia --outline
    ```
 
-4. Retrieve full content only for the most relevant source:
+4. Retrieve full content only for the same source selected in step 3:
 
    ```bash
    documentationsearch --json get "SOURCE_PATH" --family australia
@@ -59,7 +57,12 @@ npx -y @nowdevaitoolbox/documentationsearch --json status
 
 5. Cite or name the source path and release in the answer. Distinguish documented behavior from inference.
 
-Start with the default similarity threshold. If a plausible query returns nothing, retry once with `--threshold 0`, then judge relevance from title, heading, content, and similarity. Refine the query or use `--doc-type`, `--publication`, `--chunk-type`, or `--topic-type` filters when results are broad.
+For similarity-threshold handling:
+
+   1. Run the query with the default similarity threshold.
+   2. If the query returns zero results, retry once with `--threshold 0`.
+   3. If results are returned from step 2, manually assess relevance by title, heading, content, and similarity score.
+   4. If results are too broad, apply filters one at a time to narrow them: `--doc-type`, `--publication`, `--chunk-type`, or `--topic-type`.
 
 The threshold is a minimum cosine similarity for every returned result, including keyword matches. When searching multiple releases, use `--deduplicate-releases` if only the best-ranked release of each source chunk is needed.
 
