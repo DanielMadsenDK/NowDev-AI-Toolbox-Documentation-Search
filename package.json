@@ -1,0 +1,63 @@
+{
+  "name": "@nowdevaitoolbox/documentationsearch",
+  "version": "0.1.0",
+  "description": "DocumentationSearch: local-first ServiceNow documentation indexing and semantic search",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "servicenow",
+    "mcp",
+    "semantic-search",
+    "documentation",
+    "sqlite"
+  ],
+  "engines": {
+    "node": ">=20.12"
+  },
+  "bin": {
+    "documentationsearch": "./dist/cli.js",
+    "documentationsearch-mcp": "./dist/mcp.js",
+    "servicecontext": "./dist/cli.js",
+    "servicecontext-mcp": "./dist/mcp.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "skills",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run check && npm test && npm run build"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^13.0.1",
+    "commander": "^15.0.0",
+    "sqlite-vec": "^0.1.9",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.10.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.0.12",
+    "sharp": "^0.35.3"
+  }
+}
