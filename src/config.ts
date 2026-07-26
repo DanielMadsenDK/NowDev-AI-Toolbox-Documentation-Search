@@ -4,10 +4,11 @@ import path from "node:path";
 export const PACKAGE_NAME = "@nowdevaitoolbox/documentationsearch";
 export const PACKAGE_VERSION = "0.1.0";
 export const DEFAULT_FAMILY = "australia";
-export const DEFAULT_MODEL = "onnx-community/bge-small-en-v1.5-ONNX";
-export const DEFAULT_DIMENSIONS = 384;
-export const DEFAULT_POOLING = "cls";
-export const DEFAULT_QUERY_PREFIX = "Represent this sentence for searching relevant passages: ";
+export const DEFAULT_MODEL = "nomic-ai/nomic-embed-text-v1.5";
+export const DEFAULT_DIMENSIONS = 768;
+export const DEFAULT_POOLING = "mean";
+export const DEFAULT_DOCUMENT_PREFIX = "search_document: ";
+export const DEFAULT_QUERY_PREFIX = "search_query: ";
 
 export interface DocumentationSearchPaths {
   root: string;

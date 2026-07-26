@@ -15,6 +15,6 @@ describe("bundled DocumentationSearch skill", () => {
     expect(content).toContain("documentationsearch --json status");
     expect(content).toContain("search_servicenow_docs");
     expect(content).toContain("failures");
-    expect(content).toContain("bge-small-en-v1.5");
+    expect(content).toContain("nomic-embed-text-v1.5");
   });
 });

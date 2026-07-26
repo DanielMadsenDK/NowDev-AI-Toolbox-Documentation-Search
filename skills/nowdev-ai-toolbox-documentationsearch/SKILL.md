@@ -98,7 +98,7 @@ Report the failure count and relevant paths when indexing is incomplete. Do not 
 
 ## Embedding consistency
 
-Normal indexes use local `onnx-community/bge-small-en-v1.5-ONNX` embeddings with CLS pooling, normalized 384-dimensional vectors, and BGE's retrieval instruction on queries only. `--deterministic-embeddings` is only for tests and must be used consistently for both indexing and searching in a separate data directory. Never mix deterministic and BGE indexes.
+Normal indexes use local `nomic-ai/nomic-embed-text-v1.5` embeddings with mean pooling, Nomic's required layer normalization, normalized 768-dimensional vectors, and Nomic's `search_document: ` and `search_query: ` retrieval prefixes. The provider supports Nomic's Matryoshka dimensions when configured explicitly. `--deterministic-embeddings` is only for tests and must be used consistently for both indexing and searching in a separate data directory. Never mix deterministic and Nomic indexes.
 
 When the configured model or pooling changes, rebuild the index. This removes SQLite data but preserves the model cache and shallow documentation clone:
 

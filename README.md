@@ -109,7 +109,7 @@ The skill teaches agents to inspect index status, use release-filtered hybrid se
 
 inThe local SQLite database uses ordinary tables for metadata and update state, FTS5 for keyword retrieval, and `sqlite-vec` for cosine-distance vector retrieval. Reciprocal Rank Fusion and chunk-type weighting produce the final result order.
 
-The default model is `onnx-community/bge-small-en-v1.5-ONNX`, executed locally through Transformers.js with CLS pooling and normalized 384-dimensional embeddings. Indexed passages are embedded without an instruction; searches prepend BGE's recommended `Represent this sentence for searching relevant passages: ` instruction. Model files are cached and reused. The underlying `BAAI/bge-small-en-v1.5` model is MIT licensed.
+The default model is `nomic-ai/nomic-embed-text-v1.5`, executed locally through Transformers.js with mean pooling, Nomic's required layer normalization, and normalized 768-dimensional embeddings. Indexed passages receive Nomic's `search_document: ` prefix and searches receive the `search_query: ` prefix. The provider also supports Nomic's Matryoshka dimensions through its `dimensions` option. Model files are cached and reused.
 
 Indexing combines chunks from all changed documents into shared model batches. Chunks are grouped by approximate text length to reduce transformer padding, then vectors are restored to their original document order. Progress is reported throughout the embedding pass.
 

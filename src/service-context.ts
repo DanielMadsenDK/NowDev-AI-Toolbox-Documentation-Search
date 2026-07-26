@@ -76,6 +76,8 @@ export class DocumentationSearch {
       || manifest.embeddingModel !== this.embeddings.model
       || manifest.dimensions !== this.embeddings.dimensions
       || manifest.pooling !== (this.embeddings.pooling ?? "mean")
+      || manifest.layerNorm !== this.embeddings.layerNorm
+      || (manifest.documentPrefix ?? "") !== (this.embeddings.documentPrefix ?? "")
       || (manifest.queryPrefix ?? "") !== (this.embeddings.queryPrefix ?? "")
     )) {
       this.database.close();
@@ -176,7 +178,9 @@ export class DocumentationSearch {
       embeddingModel: this.embeddings.model,
       dimensions: this.embeddings.dimensions,
       pooling: this.embeddings.pooling ?? "mean",
+      layerNorm: this.embeddings.layerNorm,
       normalized: true,
+      documentPrefix: this.embeddings.documentPrefix,
       queryPrefix: this.embeddings.queryPrefix,
       updatedAt: new Date().toISOString(),
       sourceCommit: tree.commit,

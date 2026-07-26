@@ -1,11 +1,13 @@
 import type { FeatureExtractionPipeline } from "@huggingface/transformers";
-import { DEFAULT_DIMENSIONS, DEFAULT_MODEL, DEFAULT_POOLING, DEFAULT_QUERY_PREFIX } from "./config.js";
+import { DEFAULT_DIMENSIONS, DEFAULT_DOCUMENT_PREFIX, DEFAULT_MODEL, DEFAULT_POOLING, DEFAULT_QUERY_PREFIX } from "./config.js";
 
 export interface EmbeddingProvider {
   readonly name: string;
   readonly model: string;
   readonly dimensions: number;
   readonly pooling?: "mean" | "cls";
+  readonly layerNorm?: boolean;
+  readonly documentPrefix?: string;
   readonly queryPrefix?: string;
   embed(texts: string[], onProgress?: (completed: number, total: number) => void): Promise<Float32Array[]>;
   embedQuery?(query: string): Promise<Float32Array>;
@@ -17,6 +19,8 @@ export interface TransformersEmbeddingOptions {
   cacheDirectory?: string;
   dtype?: "auto" | "fp32" | "fp16" | "q8" | "q4" | "q4f16";
   pooling?: "mean" | "cls";
+  layerNorm?: boolean;
+  documentPrefix?: string;
   queryPrefix?: string;
   batchSize?: number;
   sortByLength?: boolean;
@@ -40,10 +44,13 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
   readonly model: string;
   readonly dimensions: number;
   readonly pooling: "mean" | "cls";
+  readonly layerNorm: boolean;
+  readonly documentPrefix: string;
   readonly queryPrefix: string;
   readonly batchSize: number;
   private readonly options: TransformersEmbeddingOptions;
   private pipeline?: Promise<FeatureExtractionPipeline>;
+  private layerNormOperation?: typeof import("@huggingface/transformers").layer_norm;
   private inferenceQueue: Promise<void> = Promise.resolve();
 
   constructor(options: TransformersEmbeddingOptions = {}) {
@@ -51,6 +58,8 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
     this.model = options.model ?? DEFAULT_MODEL;
     this.dimensions = options.dimensions ?? DEFAULT_DIMENSIONS;
     this.pooling = options.pooling ?? DEFAULT_POOLING;
+    this.layerNorm = options.layerNorm ?? this.model === DEFAULT_MODEL;
+    this.documentPrefix = options.documentPrefix ?? DEFAULT_DOCUMENT_PREFIX;
     this.queryPrefix = options.queryPrefix ?? DEFAULT_QUERY_PREFIX;
     this.batchSize = Math.max(1, Math.floor(options.batchSize ?? 32));
   }
@@ -59,25 +68,30 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
     if (this.pipeline) return this.pipeline;
     this.pipeline = import("@huggingface/transformers").then(async (transformers) => {
       if (this.options.cacheDirectory) transformers.env.cacheDir = this.options.cacheDirectory;
+      this.layerNormOperation = transformers.layer_norm;
       return transformers.pipeline("feature-extraction", this.model, { dtype: this.options.dtype ?? "q8" });
     });
     return this.pipeline;
   }
 
-  async embed(texts: string[], onProgress?: (completed: number, total: number) => void): Promise<Float32Array[]> {
+  private async embedPrefixed(texts: string[], prefix: string, onProgress?: (completed: number, total: number) => void): Promise<Float32Array[]> {
     if (!texts.length) return [];
     const run = async () => {
       const extractor = await this.load();
       const vectors = new Array<Float32Array>(texts.length);
       let completed = 0;
-      for (const batch of createEmbeddingBatches(texts, this.batchSize, this.options.sortByLength ?? true)) {
-        const output = await extractor(batch.map((item) => item.text), { pooling: this.pooling, normalize: true });
-        const rows = output.tolist() as number[][];
+      const prefixedTexts = texts.map((text) => `${prefix}${text}`);
+      for (const batch of createEmbeddingBatches(prefixedTexts, this.batchSize, this.options.sortByLength ?? true)) {
+        let output = await extractor(batch.map((item) => item.text), { pooling: this.pooling, normalize: false });
+        const sourceDimensions = output.dims[output.dims.length - 1]!;
+        if (this.dimensions > sourceDimensions) {
+          throw new Error(`Embedding model ${this.model} returned ${sourceDimensions} dimensions; expected at least ${this.dimensions}`);
+        }
+        if (this.layerNorm) output = this.layerNormOperation!(output, [sourceDimensions]);
+        if (this.dimensions < sourceDimensions) output = output.slice(null, [0, this.dimensions]);
+        const rows = output.normalize(2, -1).tolist() as number[][];
         for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
           const row = rows[rowIndex]!;
-          if (row.length !== this.dimensions) {
-            throw new Error(`Embedding model ${this.model} returned ${row.length} dimensions; expected ${this.dimensions}`);
-          }
           vectors[batch[rowIndex]!.index] = Float32Array.from(row);
         }
         completed += batch.length;
@@ -90,8 +104,12 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
     return pending;
   }
 
+  async embed(texts: string[], onProgress?: (completed: number, total: number) => void): Promise<Float32Array[]> {
+    return this.embedPrefixed(texts, this.documentPrefix, onProgress);
+  }
+
   async embedQuery(query: string): Promise<Float32Array> {
-    const [embedding] = await this.embed([`${this.queryPrefix}${query}`]);
+    const [embedding] = await this.embedPrefixed([query], this.queryPrefix);
     return embedding!;
   }
 }
