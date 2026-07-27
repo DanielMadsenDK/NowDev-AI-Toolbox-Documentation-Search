@@ -22,7 +22,7 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 		inputSchema: z.object({
 			query: z.string().min(1),
 			limit: z.number().int().min(1).max(50).default(10),
-			threshold: z.number().min(-1).max(1).default(0.3),
+			threshold: z.number().min(-1).max(1).default(0.3).describe("Minimum cosine similarity; exact API object and method keyword matches are retained below this value"),
 			deduplicateReleases: z.boolean().default(false),
 			maxResultsPerSource: z.number().int().min(1).max(10).default(3),
 			release: z.string().optional(),

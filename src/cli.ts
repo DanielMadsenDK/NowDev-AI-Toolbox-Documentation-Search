@@ -122,7 +122,7 @@ program.command("search")
 	.option("--publication <publication>", "filter by publication")
 	.option("--chunk-type <type>", "filter by chunk type")
 	.option("--topic-type <type>", "filter by topic type")
-	.option("--threshold <number>", "minimum cosine similarity for every result", numberOption("threshold", -1, 1), 0.3)
+	.option("--threshold <number>", "minimum cosine similarity, except exact API identifier matches", numberOption("threshold", -1, 1), 0.3)
 	.option("--deduplicate-releases", "return only the best-scoring release of each source chunk")
 	.option("--max-per-source <count>", "maximum results from one source document", integerOption("max-per-source", 1, 10), 3)
 	.action(async (query, options, command) => withContext(command, async (context) => {

@@ -278,6 +278,10 @@ export class DocumentationSearch {
     }
     if (failures.length) progress(`Completed with ${failures.length} failed document${failures.length === 1 ? "" : "s"}; see the failures list in the result.`);
     if (deleted.length) this.database.replaceSources(family, [], deleted);
+    if (prepared.length || deleted.length) {
+      progress("Optimizing the full-text search index...");
+      this.database.optimizeSearchIndex();
+    }
     const manifest: IndexManifest = {
       schemaVersion: SEARCH_SCHEMA_VERSION,
       family,

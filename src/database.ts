@@ -54,9 +54,22 @@ function looksLikeApiQuery(query: string): boolean {
     || /[A-Z_][A-Za-z0-9_]*/.test(query);
 }
 
+function identifierTerms(identifier: string | null): string[] {
+  if (!identifier) return [];
+  return identifier
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([a-z\d])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .match(/[a-z0-9_]+/g) ?? [];
+}
+
 function identifierBoost(row: SearchRow, terms: Set<string>): number {
-  const objectMatch = row.object_name !== null && terms.has(row.object_name.toLowerCase());
-  const methodMatch = row.method_name !== null && terms.has(row.method_name.toLowerCase());
+  const matches = (identifier: string | null) => {
+    const identifierWords = identifierTerms(identifier);
+    return identifierWords.length > 0 && identifierWords.every((term) => terms.has(term));
+  };
+  const objectMatch = matches(row.object_name);
+  const methodMatch = matches(row.method_name);
   if (objectMatch && methodMatch) return 1.8;
   if (methodMatch) return 1.6;
   if (objectMatch) return 1.15;
@@ -99,6 +112,10 @@ function rowToChunk(row: SearchRow): DocumentChunk {
 function filterValues(filters: SearchFilters): Array<string | null> {
   return [filters.release?.toLowerCase() ?? null, filters.docType ?? null, filters.publication ?? null, filters.chunkType ?? null, filters.topicType ?? null]
     .flatMap((value) => [value, value]);
+}
+
+function metadataBounds(value: string | undefined): [string, string] {
+  return value === undefined ? ["", "\u{10ffff}"] : [value, value];
 }
 
 export class DocumentationSearchDatabase {
@@ -149,13 +166,23 @@ export class DocumentationSearchDatabase {
       throw new Error(`Index uses ${storedDimensions}-dimensional embeddings, but provider uses ${this.dimensions}. Remove the index or use a matching model.`);
     }
     this.db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('dimensions', ?)").run(String(this.dimensions));
-    this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS document_vectors USING vec0(embedding float[${this.dimensions}] distance_metric=cosine, release text partition key)`);
+    this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS document_vectors USING vec0(
+      embedding float[${this.dimensions}] distance_metric=cosine,
+      release text partition key,
+      doc_type text,
+      publication text,
+      chunk_type text,
+      topic_type text
+    )`);
     const vectorSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'document_vectors'").pluck().get() as string | undefined;
     if (!vectorSchema?.includes("distance_metric=cosine")) {
       throw new Error("Index uses the legacy L2 vector metric. Remove the index and run nowdev-ai-toolbox-documentationsearch init to rebuild it with cosine distance.");
     }
     if (!vectorSchema.includes("partition key")) {
       throw new Error("Index predates release-partitioned vector search. Run reset-index --yes and re-index the documentation.");
+    }
+    if (!["doc_type", "publication", "chunk_type", "topic_type"].every((column) => vectorSchema.includes(column))) {
+      throw new Error("Index predates metadata-filtered vector search. Run reset-index --yes and re-index the documentation.");
     }
   }
 
@@ -191,7 +218,7 @@ export class DocumentationSearchDatabase {
         content, topic_type, product, classification, last_updated, object_name, method_name, metadata, content_hash
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       const insertFts = this.db.prepare("INSERT INTO documents_fts(rowid, title, heading, object_name, method_name, content) VALUES (?, ?, ?, ?, ?, ?)");
-      const insertVector = this.db.prepare("INSERT INTO document_vectors(rowid, embedding, release) VALUES (?, ?, ?)");
+      const insertVector = this.db.prepare("INSERT INTO document_vectors(rowid, embedding, release, doc_type, publication, chunk_type, topic_type) VALUES (?, ?, ?, ?, ?, ?, ?)");
       const insertSource = this.db.prepare("INSERT INTO sources(release, source_path, blob_sha, content_hash) VALUES (?, ?, ?, ?)");
       for (const source of sources) {
         if (source.chunks.length !== source.embeddings.length) throw new Error(`Embedding count mismatch for ${source.path}`);
@@ -199,7 +226,7 @@ export class DocumentationSearchDatabase {
           const result = insertDocument.run(chunk.docType, chunk.publication, chunk.sourcePath, chunk.release, chunk.chunkType, chunk.chunkIndex, chunk.title, chunk.heading, chunk.content, chunk.topicType, chunk.product, chunk.classification, chunk.lastUpdated, chunk.objectName, chunk.methodName, JSON.stringify(chunk.metadata), chunk.contentHash);
           const id = BigInt(result.lastInsertRowid);
           insertFts.run(id, chunk.title, chunk.heading, chunk.objectName, chunk.methodName, chunk.content);
-          insertVector.run(id, vectorBuffer(source.embeddings[index]!), chunk.release);
+          insertVector.run(id, vectorBuffer(source.embeddings[index]!), chunk.release, chunk.docType, chunk.publication, chunk.chunkType, chunk.topicType ?? "");
         });
         insertSource.run(release, source.path, source.blobSha, source.contentHash);
       }
@@ -217,26 +244,38 @@ export class DocumentationSearchDatabase {
       AND (? IS NULL OR d.publication = ?)
       AND (? IS NULL OR d.chunk_type = ?)
       AND (? IS NULL OR d.topic_type = ?)`;
-    // v.release (not d.release) so sqlite-vec recognizes the constraint as a partition-key filter and restricts the KNN scan to that release's shard instead of ranking the whole index and filtering afterward.
-    const semanticFiltersSql = `
-      AND (? IS NULL OR v.release = ?)
-      AND (? IS NULL OR d.doc_type = ?)
-      AND (? IS NULL OR d.publication = ?)
-      AND (? IS NULL OR d.chunk_type = ?)
-      AND (? IS NULL OR d.topic_type = ?)`;
     const filtersParameters = filterValues(filters);
-    const semantic = this.db.prepare(`
+    const semanticStatement = this.db.prepare(`
       SELECT d.*, v.distance FROM document_vectors v JOIN documents d ON d.id = v.rowid
-      WHERE v.embedding MATCH ? AND k = ?${semanticFiltersSql}
+      WHERE v.embedding MATCH ? AND k = ?
+        AND v.release = ?
+        AND v.doc_type >= ? AND v.doc_type <= ?
+        AND v.publication >= ? AND v.publication <= ?
+        AND v.chunk_type >= ? AND v.chunk_type <= ?
+        AND v.topic_type >= ? AND v.topic_type <= ?
       ORDER BY v.distance LIMIT ?
-    `).all(vectorBuffer(embedding), candidates, ...filtersParameters, candidates) as SearchRow[];
+    `);
+    const releases = filters.release
+      ? [filters.release.toLowerCase()]
+      : this.db.prepare("SELECT DISTINCT release FROM documents ORDER BY release").pluck().all() as string[];
+    const semanticMetadataParameters = [
+      ...metadataBounds(filters.docType),
+      ...metadataBounds(filters.publication),
+      ...metadataBounds(filters.chunkType),
+      ...metadataBounds(filters.topicType),
+    ];
+    const semantic = releases
+      .flatMap((release) => semanticStatement.all(vectorBuffer(embedding), candidates, release, ...semanticMetadataParameters, candidates) as SearchRow[])
+      .sort((left, right) => (left.distance ?? 1) - (right.distance ?? 1))
+      .slice(0, candidates);
     const keywordExpression = ftsQuery(query);
     const keyword = keywordExpression ? this.db.prepare(`
       SELECT d.*, bm25(documents_fts, 10.0, 7.0, 9.0, 9.0, 1.0) AS rank, vec_distance_cosine(v.embedding, ?) AS distance
       FROM documents_fts f
       JOIN documents d ON d.id = f.rowid
       JOIN document_vectors v ON v.rowid = d.id
-      WHERE documents_fts MATCH ?${filtersSql} ORDER BY f.rank LIMIT ?
+      WHERE documents_fts MATCH ?${filtersSql}
+      ORDER BY bm25(documents_fts, 10.0, 7.0, 9.0, 9.0, 1.0) LIMIT ?
     `).all(vectorBuffer(embedding), keywordExpression, ...filtersParameters, candidates) as SearchRow[] : [];
     const terms = new Set(queryTerms(query));
     const keywordWeight = looksLikeApiQuery(query) ? 1.25 : 1;
@@ -248,7 +287,7 @@ export class DocumentationSearchDatabase {
     });
     keyword.forEach((row, index) => {
       const similarity = 1 - (row.distance ?? 1);
-      if (similarity < threshold) return;
+      if (similarity < threshold && identifierBoost(row, terms) === 1) return;
       const current = scores.get(row.id);
       scores.set(row.id, { row, score: (current?.score ?? 0) + keywordWeight / (60 + index + 1), similarity: current?.similarity ?? similarity });
     });
@@ -290,6 +329,10 @@ export class DocumentationSearchDatabase {
       ? this.db.prepare("SELECT publication, doc_type, release, COUNT(DISTINCT source_path) AS document_count FROM documents WHERE chunk_type = 'overview' AND release = ? GROUP BY publication, doc_type, release ORDER BY doc_type, publication").all(release.toLowerCase())
       : this.db.prepare("SELECT publication, doc_type, release, COUNT(DISTINCT source_path) AS document_count FROM documents WHERE chunk_type = 'overview' GROUP BY publication, doc_type, release ORDER BY doc_type, publication, release").all()) as Array<{ publication: string; doc_type: string; release: string; document_count: number }>;
     return rows.map((row) => ({ publication: row.publication, docType: row.doc_type, release: row.release, documentCount: row.document_count }));
+  }
+
+  optimizeSearchIndex(): void {
+    this.db.prepare("INSERT INTO documents_fts(documents_fts) VALUES ('optimize')").run();
   }
 
   stats(): { documents: number; chunks: number; releases: string[] } {

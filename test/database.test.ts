@@ -40,6 +40,19 @@ describe("DocumentationSearchDatabase", () => {
     database.close();
   });
 
+  it("preserves exact split API identifier matches below the cosine threshold", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-identifier-threshold-"));
+    temporaryDirectories.push(directory);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 2);
+    const method = chunkDocument("markdown/api-reference/server-api-reference/gliderecord.md", "---\ntitle: GlideRecord\n---\n# GlideRecord\n## GlideRecord - setWorkflow(Boolean enable)\nControls processing.", "australia", "australia").find((chunk) => chunk.chunkType === "method")!;
+    database.replaceSources("australia", [{ path: method.sourcePath, blobSha: "method", contentHash: method.contentHash, chunks: [method], embeddings: [Float32Array.from([1, 0])] }], []);
+
+    const results = database.search("set workflow", Float32Array.from([0, 1]), {}, 1, 0.99);
+    expect(results[0]?.methodName).toBe("setWorkflow");
+    expect(results[0]?.similarity).toBeCloseTo(0, 5);
+    database.close();
+  });
+
   it("deduplicates matching chunks across releases after ranking", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-dedup-"));
     temporaryDirectories.push(directory);
@@ -71,6 +84,44 @@ describe("DocumentationSearchDatabase", () => {
     expect(results[0]?.sourcePath).toBe(firstChunks[0]!.sourcePath);
     expect(results[0]?.methodName).toBe("getValue");
     expect(new Set(results.map((result) => result.sourcePath))).toHaveLength(2);
+    database.close();
+  });
+
+  it("applies metadata filters before selecting vector candidates", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-prefilter-"));
+    temporaryDirectories.push(directory);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 2);
+    const irrelevantSources = Array.from({ length: 101 }, (_, index) => {
+      const [chunk] = chunkDocument(`markdown/guides/irrelevant-${index}.md`, `---\ntitle: Irrelevant ${index}\n---\n# Irrelevant ${index}\nUnrelated content.`, "australia", "australia");
+      return { path: chunk!.sourcePath, blobSha: `irrelevant-${index}`, contentHash: chunk!.contentHash, chunks: [chunk!], embeddings: [Float32Array.from([1, 0])] };
+    });
+    const [target] = chunkDocument("markdown/api-reference/server-api-reference/target.md", "---\ntitle: TargetApi\n---\n# TargetApi\n## TargetApi - targetMethod(String value)\nPerforms an operation.\n\n|Name|Type|Description|\n|---|---|---|\n|value|String|Input.|", "australia", "australia").filter((chunk) => chunk.chunkType === "parameter");
+    database.replaceSources("australia", [
+      ...irrelevantSources,
+      { path: target!.sourcePath, blobSha: "target", contentHash: target!.contentHash, chunks: [target!], embeddings: [Float32Array.from([0, 1])] },
+    ], []);
+
+    const results = database.search("absent-keyword", Float32Array.from([1, 0]), { release: "australia", chunkType: "parameter" }, 1, -1);
+    expect(results[0]?.sourcePath).toBe(target!.sourcePath);
+    expect(results[0]?.chunkType).toBe("parameter");
+    database.close();
+  });
+
+  it("uses configured BM25 column weights and preserves results after optimization", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-bm25-"));
+    temporaryDirectories.push(directory);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 2);
+    const [bodyMatch] = chunkDocument("markdown/guides/body.md", "---\ntitle: General guide\n---\n# General guide\nNeedle needle needle needle needle.", "australia", "australia");
+    const [titleMatch] = chunkDocument("markdown/guides/title.md", "---\ntitle: Needle\n---\n# Needle\nUnrelated material.", "australia", "australia");
+    database.replaceSources("australia", [
+      { path: bodyMatch!.sourcePath, blobSha: "body", contentHash: bodyMatch!.contentHash, chunks: [bodyMatch!], embeddings: [Float32Array.from([1, 0])] },
+      { path: titleMatch!.sourcePath, blobSha: "title", contentHash: titleMatch!.contentHash, chunks: [titleMatch!], embeddings: [Float32Array.from([1, 0])] },
+    ], []);
+
+    const search = () => database.search("needle", Float32Array.from([1, 0]), {}, 2, -1, false, 1);
+    expect(search()[0]?.sourcePath).toBe(titleMatch!.sourcePath);
+    database.optimizeSearchIndex();
+    expect(search()[0]?.sourcePath).toBe(titleMatch!.sourcePath);
     database.close();
   });
 });
