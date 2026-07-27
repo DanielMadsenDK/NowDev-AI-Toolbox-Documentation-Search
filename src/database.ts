@@ -9,6 +9,18 @@ interface StoredSource {
   contentHash: string;
 }
 
+export function readStoredEmbeddingProfile(filename: string): string | null {
+  if (!fs.existsSync(filename)) return null;
+  const database = new Database(filename, { readonly: true, fileMustExist: true });
+  try {
+    const hasSettings = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings'").pluck().get();
+    if (!hasSettings) return null;
+    return database.prepare("SELECT value FROM settings WHERE key = 'embedding_profile'").pluck().get() as string | undefined ?? null;
+  } finally {
+    database.close();
+  }
+}
+
 interface SearchRow {
   id: number;
   doc_type: DocumentChunk["docType"];
@@ -188,6 +200,14 @@ export class DocumentationSearchDatabase {
 
   close(): void {
     this.db.close();
+  }
+
+  embeddingProfile(): string | null {
+    return this.db.prepare("SELECT value FROM settings WHERE key = 'embedding_profile'").pluck().get() as string | undefined ?? null;
+  }
+
+  setEmbeddingProfile(profile: string): void {
+    this.db.prepare("INSERT INTO settings(key, value) VALUES ('embedding_profile', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(profile);
   }
 
   sourceMap(release: string): Map<string, StoredSource> {

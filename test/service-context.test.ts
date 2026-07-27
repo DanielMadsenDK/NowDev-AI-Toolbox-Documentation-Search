@@ -76,6 +76,26 @@ const temporaryDirectories: string[] = [];
 afterEach(() => temporaryDirectories.splice(0).forEach((directory) => fs.rmSync(directory, { recursive: true, force: true })));
 
 describe("ServiceContext", () => {
+  it("persists and automatically reloads a curated embedding profile", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-profile-"));
+    temporaryDirectories.push(directory);
+    const selected = new DocumentationSearch({ dataDirectory: directory, embeddingProfile: "all-minilm-l6-v2" });
+    expect(selected.status().embedding).toMatchObject({ profile: "all-minilm-l6-v2", model: "Xenova/all-MiniLM-L6-v2", dimensions: 384, pooling: "mean" });
+    selected.close();
+
+    const reopened = new DocumentationSearch({ dataDirectory: directory });
+    expect(reopened.status().embedding).toMatchObject({ profile: "all-minilm-l6-v2", model: "Xenova/all-MiniLM-L6-v2", dimensions: 384 });
+    reopened.close();
+  });
+
+  it("rejects a different same-dimension profile for an existing index", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-profile-mismatch-"));
+    temporaryDirectories.push(directory);
+    const selected = new DocumentationSearch({ dataDirectory: directory, embeddingProfile: "nomic-embed-text-v1" });
+    selected.close();
+    expect(() => new DocumentationSearch({ dataDirectory: directory, embeddingProfile: "nomic-embed-text-v1.5" })).toThrow("Index uses embedding profile nomic-embed-text-v1");
+  });
+
   it("indexes changed sources and skips unchanged sources", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-e2e-"));
     temporaryDirectories.push(directory);

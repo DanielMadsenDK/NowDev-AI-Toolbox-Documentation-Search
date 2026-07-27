@@ -1,6 +1,7 @@
 import { chunkDocument, contentHash } from "./chunker.js";
 import { DEFAULT_FAMILY, resolvePaths, SEARCH_SCHEMA_VERSION, type DocumentationSearchPaths } from "./config.js";
-import { DocumentationSearchDatabase } from "./database.js";
+import { DocumentationSearchDatabase, readStoredEmbeddingProfile } from "./database.js";
+import { DEFAULT_EMBEDDING_PROFILE, embeddingProfile, isEmbeddingProfileName, type EmbeddingProfileName } from "./embedding-profiles.js";
 import { TransformersEmbeddingProvider, type EmbeddingBatch, type EmbeddingDevice, type EmbeddingProvider } from "./embedder.js";
 import { GitHubDocumentationSource, type DocumentationArea, type SourceEntry } from "./github.js";
 import type { DocumentChunk, IndexFailure, IndexManifest, SearchOptions, SearchResult, UpdateResult } from "./types.js";
@@ -11,6 +12,7 @@ export interface DocumentationSearchOptions {
   embeddingBatchSize?: number;
   embeddingMaxCharacters?: number;
   embeddingThreads?: number;
+  embeddingProfile?: EmbeddingProfileName;
   embeddingProvider?: EmbeddingProvider;
   source?: GitHubDocumentationSource;
 }
@@ -92,12 +94,21 @@ function failureMessage(error: unknown): string {
 export class DocumentationSearch {
   readonly paths: DocumentationSearchPaths;
   readonly embeddings: EmbeddingProvider;
+  readonly embeddingProfileName: EmbeddingProfileName | null;
   readonly source: GitHubDocumentationSource;
   readonly database: DocumentationSearchDatabase;
 
   constructor(options: DocumentationSearchOptions = {}) {
     this.paths = resolvePaths(options.dataDirectory);
+    const storedValue = options.embeddingProvider ? null : readStoredEmbeddingProfile(this.paths.database);
+    if (storedValue && !isEmbeddingProfileName(storedValue)) {
+      throw new Error(`Index uses unknown embedding profile ${storedValue}. Upgrade DocumentationSearch or use a supported index.`);
+    }
+    const storedProfile: EmbeddingProfileName | null = storedValue && isEmbeddingProfileName(storedValue) ? storedValue : null;
+    const selectedProfile = options.embeddingProfile ?? storedProfile ?? DEFAULT_EMBEDDING_PROFILE;
+    this.embeddingProfileName = options.embeddingProvider ? null : selectedProfile;
     this.embeddings = options.embeddingProvider ?? new TransformersEmbeddingProvider({
+      ...embeddingProfile(selectedProfile),
       cacheDirectory: this.paths.models,
       device: options.embeddingDevice,
       batchSize: options.embeddingBatchSize,
@@ -106,6 +117,14 @@ export class DocumentationSearch {
     });
     this.source = options.source ?? new GitHubDocumentationSource({ repositoryDirectory: this.paths.repository });
     this.database = new DocumentationSearchDatabase(this.paths.database, this.embeddings.dimensions);
+    if (!options.embeddingProvider) {
+      const activeProfile = this.database.embeddingProfile();
+      if (activeProfile && activeProfile !== selectedProfile) {
+        this.database.close();
+        throw new Error(`Index uses embedding profile ${activeProfile}, but ${selectedProfile} was selected. Use --embedding-profile ${activeProfile}, a separate data directory, or reset the index.`);
+      }
+      this.database.setEmbeddingProfile(selectedProfile);
+    }
     const manifest = this.database.manifest();
     if (manifest && manifest.schemaVersion !== SEARCH_SCHEMA_VERSION) {
       this.database.close();
@@ -286,6 +305,7 @@ export class DocumentationSearch {
       schemaVersion: SEARCH_SCHEMA_VERSION,
       family,
       branch,
+      embeddingProfile: this.embeddingProfileName ?? undefined,
       embeddingProvider: this.embeddings.name,
       embeddingModel: this.embeddings.model,
       dimensions: this.embeddings.dimensions,
@@ -347,6 +367,7 @@ export class DocumentationSearch {
       ...this.database.stats(),
       manifest: this.database.manifest(),
       embedding: {
+        profile: this.database.embeddingProfile(),
         name: this.embeddings.name,
         model: this.embeddings.model,
         dimensions: this.embeddings.dimensions,

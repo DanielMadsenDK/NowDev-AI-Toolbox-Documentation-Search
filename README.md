@@ -36,6 +36,14 @@ nowdev-ai-toolbox-documentationsearch status
 
 Use `--area scripting` to index only scripting references, or `--limit 5` for a smoke test. Use `--json` for machine-readable output.
 
+The default embedding profile is `bge-base-en-v1.5`. A new index can instead use one of the curated ONNX/Transformers.js profiles:
+
+```bash
+node dist/cli.js --embedding-profile multilingual-e5-small --data-dir ~/.cache/documentationsearch-e5 init --family australia
+```
+
+Supported profiles are `bge-base-en-v1.5`, `nomic-embed-text-v1.5`, `nomic-embed-text-v1`, `multilingual-e5-small`, and `all-minilm-l6-v2`. The profile fixes the model, vector dimensions, pooling, normalization preparation, and retrieval prefixes as required by its model card. Use a separate data directory for each profile. The selected profile is written to the index immediately so interrupted indexing cannot later resume with a different model.
+
 Embedding runs on the native ONNX Runtime CPU provider by default. On Windows, DirectML is the most practical GPU option when your graphics driver supports it. DirectML defaults to a smaller batch and a token budget because transformer memory grows with both batch size and passage length; the provider automatically halves a batch after a native out-of-memory error:
 
 ```bash
