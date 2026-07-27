@@ -90,7 +90,7 @@ const program = new Command()
 	.addOption(new Option("--embedding-profile <profile>", `curated ONNX embedding profile (new-index default: ${DEFAULT_EMBEDDING_PROFILE})`).choices(Object.keys(EMBEDDING_PROFILES)))
 	.addOption(new Option("--device <device>", "embedding execution device").choices(["cpu", "dml", "webgpu"]).default("cpu"))
 	.option("--embedding-batch-size <count>", "texts per embedding inference batch (default: 32 CPU, 8 DirectML)", integerOption("embedding-batch-size", 1, 1024))
-	.option(`--embedding-max-characters <count>`, `maximum characters sent to the embedding model per passage (default: ${DEFAULT_MAX_EMBEDDING_CHARACTERS})`, integerOption("embedding-max-characters", 256, 1_000_000))
+	.option(`--embedding-max-characters <count>`, `override the profile-specific passage cap (MiniLM: 1024; other built-in profiles: ${DEFAULT_MAX_EMBEDDING_CHARACTERS})`, integerOption("embedding-max-characters", 256, 1_000_000))
 	.option("--embedding-threads <count>", "ONNX Runtime intra-op thread count for CPU inference (default: the host's logical core count)", integerOption("embedding-threads", 1, 1024))
 	.configureOutput({
 		outputError: (message, write) => {

@@ -36,13 +36,15 @@ nowdev-ai-toolbox-documentationsearch status
 
 Use `--area scripting` to index only scripting references, or `--limit 5` for a smoke test. Use `--json` for machine-readable output.
 
-The default embedding profile is `bge-base-en-v1.5`. A new index can instead use one of the curated ONNX/Transformers.js profiles:
+The default embedding profile for new indexes is `all-minilm-l6-v2`, which provides faster CPU indexing and 384-dimensional vectors. A new index can instead use one of the curated ONNX/Transformers.js profiles:
 
 ```bash
 node dist/cli.js --embedding-profile multilingual-e5-small --data-dir ~/.cache/documentationsearch-e5 init --family australia
 ```
 
 Supported profiles are `bge-base-en-v1.5`, `nomic-embed-text-v1.5`, `nomic-embed-text-v1`, `multilingual-e5-small`, and `all-minilm-l6-v2`. The profile fixes the model, vector dimensions, pooling, normalization preparation, and retrieval prefixes as required by its model card. Use a separate data directory for each profile. The selected profile is written to the index immediately so interrupted indexing cannot later resume with a different model.
+
+Source preparation is streamed in bounded windows: documents are downloaded and chunked, embedded in length-sorted shared batches, committed, and released before the next window is prepared. This keeps full-corpus indexing from retaining every parsed document in memory while preserving full detail embeddings.
 
 Embedding runs on the native ONNX Runtime CPU provider by default. On Windows, DirectML is the most practical GPU option when your graphics driver supports it. DirectML defaults to a smaller batch and a token budget because transformer memory grows with both batch size and passage length; the provider automatically halves a batch after a native out-of-memory error:
 
@@ -134,9 +136,9 @@ The skill teaches agents to inspect index status, use release-filtered hybrid se
 
 The local SQLite database uses ordinary tables for metadata and update state, FTS5 for keyword retrieval, and `sqlite-vec` for cosine-distance vector retrieval. The vector index is partitioned by release, and all supported vector filters are evaluated inside sqlite-vec before candidate selection. Reciprocal Rank Fusion, weighted BM25 fields, exact normalized API identifier matching, and query-aware chunk-type weighting produce the final result order. FTS5 segments are optimized after non-empty indexing updates.
 
-The default model is `Xenova/bge-base-en-v1.5`, the Transformers.js-compatible ONNX distribution of `BAAI/bge-base-en-v1.5`. It runs locally with CLS pooling and normalized 768-dimensional embeddings. BGE passages receive no instruction prefix; searches receive `Represent this sentence for searching relevant passages: `. BGE's model card specifies a 512-token maximum input, so the default embedding input cap is 2048 characters. Model files are cached and reused.
+The default model for new indexes is `Xenova/all-MiniLM-L6-v2`, a Transformers.js-compatible quantized ONNX model using mean pooling and normalized 384-dimensional embeddings. Its profile uses a conservative 1024-character input cap near the model's 256-token sentence-transformer limit. BGE remains available with `--embedding-profile bge-base-en-v1.5` for normalized 768-dimensional embeddings and a 2048-character cap. Model files are cached and reused.
 
-Indexing combines chunks from all changed documents into shared model batches. Chunks are grouped by approximate text length to reduce transformer padding, then vectors are restored to their original document order. Progress is reported throughout the embedding pass.
+Indexing streams bounded source windows into shared model batches. Chunks are sized for the active profile and grouped by approximate text length to reduce transformer padding, then vectors are restored to their original document order. Each window is committed and released before the next is prepared, and progress is reported throughout the embedding pass.
 
 An index created with another model or pooling strategy must be rebuilt. Preserve the documentation clone and downloaded models while removing only SQLite index files with:
 

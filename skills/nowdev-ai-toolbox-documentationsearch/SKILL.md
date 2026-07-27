@@ -69,7 +69,7 @@ Assume the npm-installed `@nowdevaitoolbox/nowdev-ai-toolbox-documentationsearch
 
 6. Cite or name the source path and release in the answer. Distinguish documented behavior from inference. If no result directly supports the question after refinement, say that the indexed documentation did not establish the answer rather than treating an adjacent result as authoritative.
 
-The threshold is a minimum cosine similarity for every returned result, including keyword matches. When searching multiple releases, use `--deduplicate-releases` if only the best-ranked release of each source chunk is needed.
+The threshold is a minimum cosine similarity, except that exact API object or method keyword matches are retained below it. When searching multiple releases, use `--deduplicate-releases` if only the best-ranked release of each source chunk is needed.
 
 ## Initialize and update
 
@@ -115,7 +115,7 @@ Report the failure count and relevant paths when indexing is incomplete. Do not 
 
 ## Embedding consistency
 
-Normal indexes use the Transformers.js-compatible `Xenova/bge-base-en-v1.5` distribution of `BAAI/bge-base-en-v1.5` with CLS pooling and normalized 768-dimensional vectors. BGE passages receive no instruction prefix; searches receive `Represent this sentence for searching relevant passages: `. BGE has a 512-token maximum input, and topic/API chunks are prepared at paragraph or code-line boundaries under a budget derived from the embedding cap (256 characters of headroom below it) so chunking and the embedding cap can't drift out of sync. The default embedding input cap is 2048 characters. `--deterministic-embeddings` is only for tests and must be used consistently for both indexing and searching in a separate data directory. Never mix deterministic and BGE indexes.
+New indexes default to the curated ONNX profile `all-minilm-l6-v2`, with mean pooling, normalized 384-dimensional vectors, and a 1024-character input cap near its 256-token limit. Other supported profiles include `bge-base-en-v1.5`, `nomic-embed-text-v1.5`, `nomic-embed-text-v1`, and `multilingual-e5-small`. The selected profile persists in the index and is loaded automatically by later commands. Topic and API chunks are prepared under a budget derived from that profile's embedding cap, with 256 characters of headroom. `--deterministic-embeddings` is only for tests and must be used consistently for indexing and searching in a separate data directory. Never mix embedding profiles in one index.
 
 When the configured model or pooling changes, rebuild the index. This removes SQLite data but preserves the model cache and shallow documentation clone:
 

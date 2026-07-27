@@ -65,6 +65,6 @@ describe("nowdev-ai-toolbox-documentationsearch CLI", () => {
   it("returns runtime failures as JSON when requested", () => {
     const result = runCli(["--json", "--data-dir", dataDirectory, "status"]);
     expect(result.status).toBe(1);
-    expect(JSON.parse(result.stderr)).toMatchObject({ error: expect.stringContaining("provider uses 768") });
+    expect(JSON.parse(result.stderr)).toMatchObject({ error: expect.stringContaining("provider uses 384") });
   });
 });

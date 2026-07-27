@@ -1,7 +1,7 @@
 import os from "node:os";
 import { describe, expect, it } from "vitest";
 import { createEmbeddingBatches, TransformersEmbeddingProvider, truncateEmbeddingText } from "../src/embedder.js";
-import { EMBEDDING_PROFILES } from "../src/embedding-profiles.js";
+import { DEFAULT_EMBEDDING_PROFILE, EMBEDDING_PROFILES } from "../src/embedding-profiles.js";
 
 describe("createEmbeddingBatches", () => {
   it("groups similarly sized texts while preserving original indices", () => {
@@ -52,10 +52,11 @@ describe("createEmbeddingBatches", () => {
   });
 
   it("defines model-correct curated ONNX embedding profiles", () => {
+    expect(DEFAULT_EMBEDDING_PROFILE).toBe("all-minilm-l6-v2");
     expect(EMBEDDING_PROFILES["nomic-embed-text-v1.5"]).toMatchObject({ dimensions: 768, pooling: "mean", layerNorm: true, documentPrefix: "search_document: ", queryPrefix: "search_query: " });
     expect(EMBEDDING_PROFILES["nomic-embed-text-v1"]).toMatchObject({ dimensions: 768, pooling: "mean", layerNorm: false, documentPrefix: "search_document: ", queryPrefix: "search_query: " });
     expect(EMBEDDING_PROFILES["multilingual-e5-small"]).toMatchObject({ dimensions: 384, pooling: "mean", documentPrefix: "passage: ", queryPrefix: "query: " });
-    expect(EMBEDDING_PROFILES["all-minilm-l6-v2"]).toMatchObject({ dimensions: 384, pooling: "mean", documentPrefix: "", queryPrefix: "" });
+    expect(EMBEDDING_PROFILES["all-minilm-l6-v2"]).toMatchObject({ dimensions: 384, pooling: "mean", documentPrefix: "", queryPrefix: "", maxEmbeddingCharacters: 1024 });
   });
 
   it("caps only the text representation sent to the embedding model", () => {

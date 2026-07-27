@@ -109,4 +109,13 @@ Apache Jelly documentation.
     expect(sectionChunks.every((chunk) => chunk.content.length <= MAX_CHUNK_CHARACTERS)).toBe(true);
     expect(sectionChunks.at(-1)?.content).toContain("Paragraph 79:");
   });
+
+  it("respects a smaller model-specific chunk budget", () => {
+    const paragraphs = Array.from({ length: 20 }, (_, index) => `Paragraph ${index}: ${"compact retrieval guidance ".repeat(12)}`).join("\n\n");
+    const chunks = chunkDocument("markdown/guides/minilm.md", `---\ntitle: MiniLM guide\n---\n# MiniLM guide\n## Configuration\n${paragraphs}`, "australia", "australia", 768);
+    const sections = chunks.filter((chunk) => chunk.chunkType === "section");
+    expect(sections.length).toBeGreaterThan(1);
+    expect(sections.every((chunk) => chunk.content.length <= 768)).toBe(true);
+    expect(sections.at(-1)?.content).toContain("Paragraph 19:");
+  });
 });

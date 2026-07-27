@@ -230,15 +230,15 @@ export function splitChunkText(body: string, maxCharacters = MAX_CHUNK_CHARACTER
   });
 }
 
-function splitTopicContent(prefix: string, body: string): string[] {
+function splitTopicContent(prefix: string, body: string, maxCharacters = MAX_CHUNK_CHARACTERS): string[] {
   const separator = body.trim() ? "\n\n" : "";
-  const budget = Math.max(256, MAX_CHUNK_CHARACTERS - prefix.length - separator.length);
+  const budget = Math.max(256, maxCharacters - prefix.length - separator.length);
   return splitChunkText(body, budget).map((part) => `${prefix}${part ? `${separator}${part}` : ""}`);
 }
 
-function splitApiContent(label: string, objectName: string, methodName: string | null, signature: string | null, release: string, detail: string): string[] {
+function splitApiContent(label: string, objectName: string, methodName: string | null, signature: string | null, release: string, detail: string, maxCharacters = MAX_CHUNK_CHARACTERS): string[] {
   const prefix = `${apiContent(label, objectName, methodName, signature, release)}\n${label}: `;
-  const budget = Math.max(256, MAX_CHUNK_CHARACTERS - prefix.length);
+  const budget = Math.max(256, maxCharacters - prefix.length);
   return splitChunkText(detail, budget).map((part) => `${prefix}${part}`);
 }
 
@@ -268,7 +268,7 @@ function apiContent(label: string, objectName: string, methodName: string | null
   ].filter(Boolean).join("\n");
 }
 
-function chunkApiDoc(sourcePath: string, markdown: string, branch: string, family: string): DocumentChunk[] {
+function chunkApiDoc(sourcePath: string, markdown: string, branch: string, family: string, maxCharacters: number): DocumentChunk[] {
   const [frontmatter, rawBody] = parseFrontmatter(markdown);
   const body = normalizeMarkdown(rawBody);
   const title = extractTitle(body, frontmatter);
@@ -345,7 +345,7 @@ function chunkApiDoc(sourcePath: string, markdown: string, branch: string, famil
       contentHash: hash,
     });
     const appendDetail = (chunkType: ChunkType, label: string, detail: string, metadata: Record<string, unknown>) => {
-      const contents = splitApiContent(label, position.objectName, methodName, position.signature, release, detail);
+      const contents = splitApiContent(label, position.objectName, methodName, position.signature, release, detail, maxCharacters);
       contents.forEach((content, partIndex) => append(chunkType, content, contents.length > 1 ? { ...metadata, chunk_part: partIndex + 1 } : metadata));
     };
     appendDetail(docType === "rest-api" ? "endpoint" : "method", "Summary", summary, methodMetadata);
@@ -369,7 +369,7 @@ function baseTopicMetadata(sourcePath: string, frontmatter: Frontmatter, branch:
   };
 }
 
-function chunkTopicDoc(sourcePath: string, markdown: string, branch: string, family: string): DocumentChunk[] {
+function chunkTopicDoc(sourcePath: string, markdown: string, branch: string, family: string, maxCharacters: number): DocumentChunk[] {
   const [frontmatter, rawBody] = parseFrontmatter(markdown);
   if (frontmatter.topic_type === "toc") return [];
   const body = normalizeMarkdown(rawBody);
@@ -392,11 +392,11 @@ function chunkTopicDoc(sourcePath: string, markdown: string, branch: string, fam
     `Release: ${release}`,
   ].filter(Boolean).join("\n");
   const overviewBody = lines.slice(0, firstHeading).join("\n").trim();
-  const chunks: DocumentChunk[] = splitTopicContent(contentPrefix(), overviewBody).map((content, index) => ({ ...common, chunkType: "overview", chunkIndex: index, heading: null, content, metadata: { ...metadata, full_content: body } }));
+  const chunks: DocumentChunk[] = splitTopicContent(contentPrefix(), overviewBody, maxCharacters).map((content, index) => ({ ...common, chunkType: "overview", chunkIndex: index, heading: null, content, metadata: { ...metadata, full_content: body } }));
   headings.forEach((item, index) => {
     const end = headings[index + 1]?.index ?? lines.length;
     const sectionBody = lines.slice(item.index + 1, end).join("\n").trim();
-    splitTopicContent(contentPrefix(item.heading), sectionBody).forEach((content) => chunks.push({ ...common, chunkType: "section", chunkIndex: chunks.length, heading: item.heading, content, metadata: { ...metadata, section_content: lines.slice(item.index, end).join("\n").trim() } }));
+    splitTopicContent(contentPrefix(item.heading), sectionBody, maxCharacters).forEach((content) => chunks.push({ ...common, chunkType: "section", chunkIndex: chunks.length, heading: item.heading, content, metadata: { ...metadata, section_content: lines.slice(item.index, end).join("\n").trim() } }));
   });
   return chunks;
 }
@@ -421,8 +421,8 @@ function chunkGlossary(sourcePath: string, markdown: string, branch: string, fam
   });
 }
 
-export function chunkDocument(sourcePath: string, markdown: string, branch: string, family: string): DocumentChunk[] {
-  if (API_PREFIXES.some((prefix) => sourcePath.startsWith(prefix)) || TOP_LEVEL_API.test(sourcePath)) return chunkApiDoc(sourcePath, markdown, branch, family);
+export function chunkDocument(sourcePath: string, markdown: string, branch: string, family: string, maxCharacters = MAX_CHUNK_CHARACTERS): DocumentChunk[] {
+  if (API_PREFIXES.some((prefix) => sourcePath.startsWith(prefix)) || TOP_LEVEL_API.test(sourcePath)) return chunkApiDoc(sourcePath, markdown, branch, family, maxCharacters);
   if (sourcePath.startsWith(GLOSSARY_PREFIX)) return chunkGlossary(sourcePath, markdown, branch, family);
-  return chunkTopicDoc(sourcePath, markdown, branch, family);
+  return chunkTopicDoc(sourcePath, markdown, branch, family, maxCharacters);
 }
