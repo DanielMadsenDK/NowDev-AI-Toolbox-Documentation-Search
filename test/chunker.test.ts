@@ -36,6 +36,35 @@ gr.chooseWindow(0, 10);
     expect(methodChunks.find((chunk) => chunk.chunkType === "method")?.content).toContain("Summary: Sets a range");
   });
 
+  it("adds split identifier keywords to every API chunk", () => {
+    const markdown = `---
+title: GlideEmailOutbound - Global
+release: australia
+---
+# GlideEmailOutbound - Global
+
+## GlideEmailOutbound - addAddress(String recipient)
+
+Adds a recipient.
+
+|Name|Type|Description|
+|----|----|-----------|
+|recipient|String|Email address.|
+
+|Type|Description|
+|----|-----------|
+|void||
+
+\`\`\`
+email.addAddress("user@example.com");
+\`\`\`
+`;
+    const chunks = chunkDocument("markdown/api-reference/server-api-reference/c_GlideEmailOutboundAPI.md", markdown, "australia", "australia");
+    const apiChunks = chunks.filter((chunk) => chunk.methodName === "addAddress");
+    expect(apiChunks).toHaveLength(4);
+    expect(apiChunks.every((chunk) => chunk.content.includes("Keywords: glide email outbound add address"))).toBe(true);
+  });
+
   it("recognizes deprecated API titles", () => {
     const markdown = `---
 title: GlideEncrypter - Global \\(deprecated\\)

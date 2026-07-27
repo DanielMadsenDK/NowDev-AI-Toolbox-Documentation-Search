@@ -246,6 +246,17 @@ function extractExamples(body: string): string[] {
   return [...body.matchAll(CODE_FENCE)].map((match) => match[1]?.trim() ?? "").filter(Boolean);
 }
 
+function identifierKeywords(...names: Array<string | null>): string {
+  const words = names
+    .filter((name): name is string => Boolean(name))
+    .join(" ")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([a-z\d])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .match(/[a-z0-9_]+/g) ?? [];
+  return [...new Set(words)].join(" ");
+}
+
 function apiContent(label: string, objectName: string, methodName: string | null, signature: string | null, release: string, detail?: string): string {
   return [
     `Object: ${objectName}`,
@@ -253,6 +264,7 @@ function apiContent(label: string, objectName: string, methodName: string | null
     signature ? `Signature: ${signature}` : null,
     `Release: ${release}`,
     detail ? `${label}: ${detail}` : null,
+    `Keywords: ${identifierKeywords(objectName, methodName)}`,
   ].filter(Boolean).join("\n");
 }
 
