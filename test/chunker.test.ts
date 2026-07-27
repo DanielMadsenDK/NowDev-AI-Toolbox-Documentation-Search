@@ -109,6 +109,35 @@ gr.addQuery('active', true);
     expect(addQuery.find((chunk) => chunk.chunkType === "returns")?.content).toContain("GlideQueryCondition");
   });
 
+  it("adds split identifier keywords to every API chunk", () => {
+    const markdown = `---
+title: GlideEmailOutbound - Global
+release: australia
+---
+# GlideEmailOutbound - Global
+
+## GlideEmailOutbound - addAddress(String recipient)
+
+Adds a recipient.
+
+|Name|Type|Description|
+|----|----|-----------|
+|recipient|String|Email address.|
+
+|Type|Description|
+|----|-----------|
+|void||
+
+\`\`\`
+email.addAddress("user@example.com");
+\`\`\`
+`;
+    const chunks = chunkDocument("markdown/api-reference/server-api-reference/c_GlideEmailOutboundAPI.md", markdown, "australia", "australia");
+    const apiChunks = chunks.filter((chunk) => chunk.methodName === "addAddress");
+    expect(apiChunks).toHaveLength(4);
+    expect(apiChunks.every((chunk) => chunk.content.includes("Keywords: glide email outbound add address"))).toBe(true);
+  });
+
   it("recognizes deprecated API titles", () => {
     const markdown = `---
 title: GlideEncrypter - Global \\(deprecated\\)
@@ -152,5 +181,14 @@ Apache Jelly documentation.
     expect(sectionChunks.length).toBeGreaterThan(1);
     expect(sectionChunks.every((chunk) => chunk.content.length <= MAX_CHUNK_CHARACTERS)).toBe(true);
     expect(sectionChunks.at(-1)?.content).toContain("Paragraph 79:");
+  });
+
+  it("respects a smaller model-specific chunk budget", () => {
+    const paragraphs = Array.from({ length: 20 }, (_, index) => `Paragraph ${index}: ${"compact retrieval guidance ".repeat(12)}`).join("\n\n");
+    const chunks = chunkDocument("markdown/guides/minilm.md", `---\ntitle: MiniLM guide\n---\n# MiniLM guide\n## Configuration\n${paragraphs}`, "australia", "australia", 768);
+    const sections = chunks.filter((chunk) => chunk.chunkType === "section");
+    expect(sections.length).toBeGreaterThan(1);
+    expect(sections.every((chunk) => chunk.content.length <= 768)).toBe(true);
+    expect(sections.at(-1)?.content).toContain("Paragraph 19:");
   });
 });

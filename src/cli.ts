@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_EMBEDDING_CHARACTERS, PACKAGE_VERSION } from "./config.js";
 import { resolvePaths } from "./config.js";
 import { HashEmbeddingProvider, type EmbeddingDevice } from "./embedder.js";
+import { DEFAULT_EMBEDDING_PROFILE, EMBEDDING_PROFILES, type EmbeddingProfileName } from "./embedding-profiles.js";
 import { DocumentationSearch } from "./service-context.js";
 import type { ChunkType, DocType } from "./types.js";
 
@@ -17,6 +18,7 @@ interface GlobalOptions {
 	embeddingBatchSize?: number;
 	embeddingMaxCharacters?: number;
 	embeddingThreads?: number;
+	embeddingProfile?: EmbeddingProfileName;
 }
 
 function integerOption(name: string, minimum: number, maximum: number) {
@@ -48,6 +50,7 @@ function createContext(command: Command): DocumentationSearch {
 		embeddingBatchSize: options.embeddingBatchSize,
 		embeddingMaxCharacters: options.embeddingMaxCharacters,
 		embeddingThreads: options.embeddingThreads,
+		embeddingProfile: options.embeddingProfile,
 		embeddingProvider: options.deterministicEmbeddings ? new HashEmbeddingProvider() : undefined,
 	});
 }
@@ -84,9 +87,10 @@ const program = new Command()
 	.option("--data-dir <directory>", "override the local data directory")
 	.option("--json", "emit JSON")
 	.option("--deterministic-embeddings", "use lightweight hash embeddings for testing")
+	.addOption(new Option("--embedding-profile <profile>", `curated ONNX embedding profile (new-index default: ${DEFAULT_EMBEDDING_PROFILE})`).choices(Object.keys(EMBEDDING_PROFILES)))
 	.addOption(new Option("--device <device>", "embedding execution device").choices(["cpu", "dml", "webgpu"]).default("cpu"))
 	.option("--embedding-batch-size <count>", "texts per embedding inference batch (default: 32 CPU, 8 DirectML)", integerOption("embedding-batch-size", 1, 1024))
-	.option(`--embedding-max-characters <count>`, `maximum characters sent to the embedding model per passage (default: ${DEFAULT_MAX_EMBEDDING_CHARACTERS})`, integerOption("embedding-max-characters", 256, 1_000_000))
+	.option(`--embedding-max-characters <count>`, `override the profile-specific passage cap (MiniLM: 1024; other built-in profiles: ${DEFAULT_MAX_EMBEDDING_CHARACTERS})`, integerOption("embedding-max-characters", 256, 1_000_000))
 	.option("--embedding-threads <count>", "ONNX Runtime intra-op thread count for CPU inference (default: the host's logical core count)", integerOption("embedding-threads", 1, 1024))
 	.configureOutput({
 		outputError: (message, write) => {
@@ -122,7 +126,7 @@ program.command("search")
 	.option("--publication <publication>", "filter by publication")
 	.option("--chunk-type <type>", "filter by chunk type")
 	.option("--topic-type <type>", "filter by topic type")
-	.option("--threshold <number>", "minimum cosine similarity for every result", numberOption("threshold", -1, 1), 0.3)
+	.option("--threshold <number>", "minimum cosine similarity, except exact API identifier matches", numberOption("threshold", -1, 1), 0.3)
 	.option("--deduplicate-releases", "return only the best-scoring release of each source chunk")
 	.option("--max-per-source <count>", "maximum results from one source document", integerOption("max-per-source", 1, 10), 3)
 	.action(async (query, options, command) => withContext(command, async (context) => {

@@ -33,6 +33,7 @@ describe("nowdev-ai-toolbox-documentationsearch CLI", () => {
   it.each([
     ["search limit", ["search", "GlideQuery", "--limit", "nope"], "limit must be an integer"],
     ["search threshold", ["search", "GlideQuery", "--threshold", "nope"], "threshold must be a finite number"],
+    ["embedding profile", ["--embedding-profile", "unsupported", "status"], "Allowed choices"],
     ["update concurrency", ["update", "--concurrency", "nope"], "concurrency must be an integer"],
     ["update limit", ["update", "--limit", "0"], "limit must be between 1 and 1000000"],
   ])("rejects malformed %s values as JSON", (_name, commandArguments, expected) => {
@@ -64,6 +65,6 @@ describe("nowdev-ai-toolbox-documentationsearch CLI", () => {
   it("returns runtime failures as JSON when requested", () => {
     const result = runCli(["--json", "--data-dir", dataDirectory, "status"]);
     expect(result.status).toBe(1);
-    expect(JSON.parse(result.stderr)).toMatchObject({ error: expect.stringContaining("provider uses 768") });
+    expect(JSON.parse(result.stderr)).toMatchObject({ error: expect.stringContaining("provider uses 384") });
   });
 });

@@ -62,6 +62,7 @@ export interface IndexManifest {
   schemaVersion: number;
   family: string;
   branch: string;
+  embeddingProfile?: string;
   embeddingProvider: string;
   embeddingModel: string;
   dimensions: number;

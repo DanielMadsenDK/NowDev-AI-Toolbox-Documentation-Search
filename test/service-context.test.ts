@@ -56,6 +56,23 @@ class TwoDocumentSource extends GitHubDocumentationSource {
   }
 }
 
+class ManyDocumentSource extends GitHubDocumentationSource {
+  readonly total = 129;
+  downloads = 0;
+
+  override async discover(): Promise<SourceTree> {
+    return {
+      commit: "many-documents",
+      entries: Array.from({ length: this.total }, (_, index) => ({ path: `markdown/guides/${index}.md`, blobSha: `sha-${index}` })),
+    };
+  }
+
+  override async download(_branch: string, entry: SourceEntry): Promise<string> {
+    this.downloads += 1;
+    return `---\ntitle: ${entry.path}\n---\n# ${entry.path}\nContent.`;
+  }
+}
+
 class StreamingEmbeddingProvider extends HashEmbeddingProvider {
   calls = 0;
   afterBatch?: (batch: EmbeddingBatch) => void;
@@ -76,6 +93,34 @@ const temporaryDirectories: string[] = [];
 afterEach(() => temporaryDirectories.splice(0).forEach((directory) => fs.rmSync(directory, { recursive: true, force: true })));
 
 describe("ServiceContext", () => {
+  it("uses MiniLM for a new index when no profile is selected", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-default-profile-"));
+    temporaryDirectories.push(directory);
+    const context = new DocumentationSearch({ dataDirectory: directory });
+    expect(context.status().embedding).toMatchObject({ profile: "all-minilm-l6-v2", model: "Xenova/all-MiniLM-L6-v2", dimensions: 384, pooling: "mean" });
+    context.close();
+  });
+
+  it("persists and automatically reloads a curated embedding profile", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-profile-"));
+    temporaryDirectories.push(directory);
+    const selected = new DocumentationSearch({ dataDirectory: directory, embeddingProfile: "all-minilm-l6-v2" });
+    expect(selected.status().embedding).toMatchObject({ profile: "all-minilm-l6-v2", model: "Xenova/all-MiniLM-L6-v2", dimensions: 384, pooling: "mean" });
+    selected.close();
+
+    const reopened = new DocumentationSearch({ dataDirectory: directory });
+    expect(reopened.status().embedding).toMatchObject({ profile: "all-minilm-l6-v2", model: "Xenova/all-MiniLM-L6-v2", dimensions: 384 });
+    reopened.close();
+  });
+
+  it("rejects a different same-dimension profile for an existing index", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-profile-mismatch-"));
+    temporaryDirectories.push(directory);
+    const selected = new DocumentationSearch({ dataDirectory: directory, embeddingProfile: "nomic-embed-text-v1" });
+    selected.close();
+    expect(() => new DocumentationSearch({ dataDirectory: directory, embeddingProfile: "nomic-embed-text-v1.5" })).toThrow("Index uses embedding profile nomic-embed-text-v1");
+  });
+
   it("indexes changed sources and skips unchanged sources", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-e2e-"));
     temporaryDirectories.push(directory);
@@ -119,6 +164,23 @@ describe("ServiceContext", () => {
     expect(result).toMatchObject({ added: 2, chunks: 2, failures: [] });
     expect(embeddings.calls).toBe(1);
     expect(observedDocuments).toEqual([1, 2]);
+    context.close();
+  });
+
+  it("starts embedding before every changed source is prepared", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-streaming-"));
+    temporaryDirectories.push(directory);
+    const source = new ManyDocumentSource();
+    const embeddings = new StreamingEmbeddingProvider(32);
+    const context = new DocumentationSearch({ dataDirectory: directory, embeddingProvider: embeddings, source });
+    const downloadsAtFirstEmbedding: number[] = [];
+    embeddings.afterBatch = () => {
+      if (!downloadsAtFirstEmbedding.length) downloadsAtFirstEmbedding.push(source.downloads);
+    };
+
+    const result = await context.update({ family: "australia", concurrency: 8 });
+    expect(downloadsAtFirstEmbedding).toEqual([128]);
+    expect(result).toMatchObject({ added: 129, chunks: 129, failures: [] });
     context.close();
   });
 });

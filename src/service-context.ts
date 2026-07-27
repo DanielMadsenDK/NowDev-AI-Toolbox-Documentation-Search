@@ -1,6 +1,7 @@
 import { chunkDocument, contentHash } from "./chunker.js";
-import { DEFAULT_FAMILY, resolvePaths, SEARCH_SCHEMA_VERSION, type DocumentationSearchPaths } from "./config.js";
-import { DocumentationSearchDatabase } from "./database.js";
+import { DEFAULT_FAMILY, DEFAULT_MAX_EMBEDDING_CHARACTERS, resolvePaths, SEARCH_SCHEMA_VERSION, type DocumentationSearchPaths } from "./config.js";
+import { DocumentationSearchDatabase, readStoredEmbeddingProfile } from "./database.js";
+import { DEFAULT_EMBEDDING_PROFILE, embeddingProfile, isEmbeddingProfileName, type EmbeddingProfileName } from "./embedding-profiles.js";
 import { TransformersEmbeddingProvider, type EmbeddingBatch, type EmbeddingDevice, type EmbeddingProvider } from "./embedder.js";
 import { GitHubDocumentationSource, type DocumentationArea, type SourceEntry } from "./github.js";
 import type { DocumentChunk, IndexFailure, IndexManifest, SearchOptions, SearchResult, UpdateResult } from "./types.js";
@@ -11,6 +12,7 @@ export interface DocumentationSearchOptions {
   embeddingBatchSize?: number;
   embeddingMaxCharacters?: number;
   embeddingThreads?: number;
+  embeddingProfile?: EmbeddingProfileName;
   embeddingProvider?: EmbeddingProvider;
   source?: GitHubDocumentationSource;
 }
@@ -46,6 +48,7 @@ async function mapConcurrent<T, R>(items: T[], concurrency: number, action: (ite
 
 // Chunks per shared-batch group. Batching sorts texts by length within a group to cut wasted padding, which scrambles document order — a document only commits once every one of its chunks is embedded. Keeping groups well below the size of a full large corpus means a document waits on its own group (a few hundred documents), not the entire run, before its embeddings land in the database.
 const EMBEDDING_GROUP_CHUNK_TARGET = 4000;
+const PREPARATION_SOURCE_BATCH_SIZE = 128;
 
 function groupSources<T extends { chunks: unknown[] }>(sources: T[], targetChunks: number): T[][] {
   const groups: T[][] = [];
@@ -92,20 +95,37 @@ function failureMessage(error: unknown): string {
 export class DocumentationSearch {
   readonly paths: DocumentationSearchPaths;
   readonly embeddings: EmbeddingProvider;
+  readonly embeddingProfileName: EmbeddingProfileName | null;
   readonly source: GitHubDocumentationSource;
   readonly database: DocumentationSearchDatabase;
 
   constructor(options: DocumentationSearchOptions = {}) {
     this.paths = resolvePaths(options.dataDirectory);
+    const storedValue = options.embeddingProvider ? null : readStoredEmbeddingProfile(this.paths.database);
+    if (storedValue && !isEmbeddingProfileName(storedValue)) {
+      throw new Error(`Index uses unknown embedding profile ${storedValue}. Upgrade DocumentationSearch or use a supported index.`);
+    }
+    const storedProfile: EmbeddingProfileName | null = storedValue && isEmbeddingProfileName(storedValue) ? storedValue : null;
+    const selectedProfile = options.embeddingProfile ?? storedProfile ?? DEFAULT_EMBEDDING_PROFILE;
+    this.embeddingProfileName = options.embeddingProvider ? null : selectedProfile;
     this.embeddings = options.embeddingProvider ?? new TransformersEmbeddingProvider({
+      ...embeddingProfile(selectedProfile),
       cacheDirectory: this.paths.models,
       device: options.embeddingDevice,
       batchSize: options.embeddingBatchSize,
-      maxEmbeddingCharacters: options.embeddingMaxCharacters,
+      ...(options.embeddingMaxCharacters === undefined ? {} : { maxEmbeddingCharacters: options.embeddingMaxCharacters }),
       threads: options.embeddingThreads,
     });
     this.source = options.source ?? new GitHubDocumentationSource({ repositoryDirectory: this.paths.repository });
     this.database = new DocumentationSearchDatabase(this.paths.database, this.embeddings.dimensions);
+    if (!options.embeddingProvider) {
+      const activeProfile = this.database.embeddingProfile();
+      if (activeProfile && activeProfile !== selectedProfile) {
+        this.database.close();
+        throw new Error(`Index uses embedding profile ${activeProfile}, but ${selectedProfile} was selected. Use --embedding-profile ${activeProfile}, a separate data directory, or reset the index.`);
+      }
+      this.database.setEmbeddingProfile(selectedProfile);
+    }
     const manifest = this.database.manifest();
     if (manifest && manifest.schemaVersion !== SEARCH_SCHEMA_VERSION) {
       this.database.close();
@@ -151,7 +171,7 @@ export class DocumentationSearch {
     const changed = entries.filter((entry) => options.refresh || current.get(entry.path)?.blobSha !== entry.blobSha);
     progress(`${changed.length} changed, ${deleted.length} deleted; preparing chunks...`);
     let processed = 0;
-    const parseResults = await mapConcurrent(changed, options.concurrency ?? 8, async (entry: SourceEntry): Promise<ParseResult> => {
+    const parseEntries = (sourceEntries: SourceEntry[]) => mapConcurrent(sourceEntries, options.concurrency ?? 8, async (entry: SourceEntry): Promise<ParseResult> => {
       const failed = (stage: IndexFailure["stage"], error: unknown): ParseResult => {
         processed += 1;
         const failure = { sourcePath: entry.path, stage, error: failureMessage(error) };
@@ -166,7 +186,8 @@ export class DocumentationSearch {
       }
       let chunks: DocumentChunk[];
       try {
-        chunks = chunkDocument(entry.path, markdown, branch, family);
+        const maxChunkCharacters = Math.max(256, (this.embeddings.maxEmbeddingCharacters ?? DEFAULT_MAX_EMBEDDING_CHARACTERS) - 256);
+        chunks = chunkDocument(entry.path, markdown, branch, family, maxChunkCharacters);
       } catch (error) {
         return failed("chunk", error);
       }
@@ -174,9 +195,7 @@ export class DocumentationSearch {
       progress(`Prepared ${processed}/${changed.length}: ${entry.path}`);
       return { parsed: { path: entry.path, blobSha: entry.blobSha, contentHash: contentHash(markdown), chunks } };
     });
-    const parsed = parseResults.flatMap((result) => result.parsed ? [result.parsed] : []);
-    const failures = parseResults.flatMap((result) => result.failure ? [result.failure] : []);
-    const totalChunks = parsed.reduce((total, source) => total + source.chunks.length, 0);
+    const failures: IndexFailure[] = [];
     const prepared: Array<{ path: string; chunkCount: number }> = [];
     const committedPaths = new Set<string>();
     const commit = (sources: PreparedSource[]): void => {
@@ -210,21 +229,20 @@ export class DocumentationSearch {
       if (embeddings.some((embedding) => !embedding)) throw new Error(`Embedding count mismatch for ${source.path}`);
       return embeddings as Float32Array[];
     };
-    if (totalChunks) progress(`Embedding ${totalChunks} chunks in shared batches...`);
-    // Time-based rather than percentage-based: on a very large corpus, a 5% interval can go silent for minutes on slower hardware, which looks like a hang even though embedding is still progressing.
+    // Time-based rather than percentage-based: source preparation is streamed, so the final chunk count is not retained in memory up front.
     let overallCompleted = 0;
     let lastEmbeddingProgressTime = Date.now();
     const progressIntervalMilliseconds = 10_000;
     const reportOverallProgress = (): void => {
       const now = Date.now();
-      if (overallCompleted === totalChunks || now - lastEmbeddingProgressTime >= progressIntervalMilliseconds) {
-        progress(`Embedded ${overallCompleted}/${totalChunks} chunks...`);
+      if (now - lastEmbeddingProgressTime >= progressIntervalMilliseconds) {
+        progress(`Embedded ${overallCompleted} chunks...`);
         lastEmbeddingProgressTime = now;
       }
     };
-    for (const group of groupSources(parsed, EMBEDDING_GROUP_CHUNK_TARGET)) {
+    const embedGroup = async (group: ParsedSource[]): Promise<void> => {
       const groupChunks = group.flatMap((source) => source.chunks);
-      if (!groupChunks.length) continue;
+      if (!groupChunks.length) return;
       // Scoped per group (not the whole corpus): once a group finishes, its states/locations become garbage, and every document in it has committed, however the corpus-wide length sort inside embedBatched reordered this group's chunks.
       const states = group.map<EmbeddingState>((source) => ({ source, embeddings: new Array(source.chunks.length), completed: 0 }));
       const locations = states.flatMap((state) => state.source.chunks.map((_, index) => ({ state, index })));
@@ -275,13 +293,26 @@ export class DocumentationSearch {
         }
         reportOverallProgress();
       }
+    };
+    for (let offset = 0; offset < changed.length; offset += PREPARATION_SOURCE_BATCH_SIZE) {
+      const parseResults = await parseEntries(changed.slice(offset, offset + PREPARATION_SOURCE_BATCH_SIZE));
+      const parsed = parseResults.flatMap((result) => result.parsed ? [result.parsed] : []);
+      failures.push(...parseResults.flatMap((result) => result.failure ? [result.failure] : []));
+      if (parsed.some((source) => source.chunks.length)) progress(`Embedding prepared chunks through ${processed}/${changed.length} sources...`);
+      for (const group of groupSources(parsed, EMBEDDING_GROUP_CHUNK_TARGET)) await embedGroup(group);
     }
+    if (overallCompleted) progress(`Embedded ${overallCompleted} chunks.`);
     if (failures.length) progress(`Completed with ${failures.length} failed document${failures.length === 1 ? "" : "s"}; see the failures list in the result.`);
     if (deleted.length) this.database.replaceSources(family, [], deleted);
+    if (prepared.length || deleted.length) {
+      progress("Optimizing the full-text search index...");
+      this.database.optimizeSearchIndex();
+    }
     const manifest: IndexManifest = {
       schemaVersion: SEARCH_SCHEMA_VERSION,
       family,
       branch,
+      embeddingProfile: this.embeddingProfileName ?? undefined,
       embeddingProvider: this.embeddings.name,
       embeddingModel: this.embeddings.model,
       dimensions: this.embeddings.dimensions,
@@ -343,6 +374,7 @@ export class DocumentationSearch {
       ...this.database.stats(),
       manifest: this.database.manifest(),
       embedding: {
+        profile: this.database.embeddingProfile(),
         name: this.embeddings.name,
         model: this.embeddings.model,
         dimensions: this.embeddings.dimensions,
