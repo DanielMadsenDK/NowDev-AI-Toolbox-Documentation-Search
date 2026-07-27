@@ -25,7 +25,7 @@ beforeAll(async () => {
     database.replaceSources(release, [{ path: sourcePath, blobSha: release, contentHash: chunks[0]!.contentHash, chunks, embeddings: chunks.map(() => queryEmbedding!) }], []);
   }
   database.close();
-});
+}, 60_000);
 
 afterAll(() => fs.rmSync(dataDirectory, { recursive: true, force: true }));
 

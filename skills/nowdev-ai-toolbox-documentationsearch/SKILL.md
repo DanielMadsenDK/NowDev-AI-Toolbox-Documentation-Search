@@ -41,34 +41,45 @@ Assume the npm-installed `@nowdevaitoolbox/nowdev-ai-toolbox-documentationsearch
    nowdev-ai-toolbox-documentationsearch --json search "natural-language query" --family australia --limit 10
    ```
 
+   Threshold handling:
+   - Run the query with the default similarity threshold.
+   - If the query returns zero results, retry once with `--threshold 0`.
+   - If results are returned from the retry, manually assess relevance by title, heading, content, and similarity score.
+   - If results are too broad, apply filters one at a time to narrow them: `--doc-type`, `--publication`, `--chunk-type`, or `--topic-type`.
+
    If the requested release is not indexed, inform the user which releases are available, ask whether to proceed with the closest available release or initialize the requested one, and do not guess at release-specific behavior.
 
-3. Use the highest-similarity result's exact `sourcePath` to inspect its structure:
+3. Inspect the returned results before selecting a document. Similarity is a ranking signal, not proof of relevance. Choose the result whose title, heading, and content directly address the question; for broad topics, refine the query or add a filter instead of following an adjacent result. For initial topic discovery, use `--max-per-source 1` or `2` to reduce repeated chunks:
+
+   ```bash
+   nowdev-ai-toolbox-documentationsearch --json search "focused query" --family australia --limit 10 --max-per-source 1
+   ```
+
+4. Use the selected result's exact `sourcePath` to inspect its structure:
 
    ```bash
    nowdev-ai-toolbox-documentationsearch --json get "SOURCE_PATH" --family australia --outline
    ```
 
-4. Retrieve full content only for the same source selected in step 3:
+5. Retrieve full content only for the same source selected in step 4:
 
    ```bash
    nowdev-ai-toolbox-documentationsearch --json get "SOURCE_PATH" --family australia
    ```
 
-5. Cite or name the source path and release in the answer. Distinguish documented behavior from inference.
-
-For similarity-threshold handling:
-
-   1. Run the query with the default similarity threshold.
-   2. If the query returns zero results, retry once with `--threshold 0`.
-   3. If results are returned from step 2, manually assess relevance by title, heading, content, and similarity score.
-   4. If results are too broad, apply filters one at a time to narrow them: `--doc-type`, `--publication`, `--chunk-type`, or `--topic-type`.
+6. Cite or name the source path and release in the answer. Distinguish documented behavior from inference. If no result directly supports the question after refinement, say that the indexed documentation did not establish the answer rather than treating an adjacent result as authoritative.
 
 The threshold is a minimum cosine similarity for every returned result, including keyword matches. When searching multiple releases, use `--deduplicate-releases` if only the best-ranked release of each source chunk is needed.
 
 ## Initialize and update
 
-If status shows no documents, ask before starting a large download unless the user explicitly requested indexing. For scripting-only coverage:
+If status shows no documents, ask before starting any download that uses --area all-docs, or any init not explicitly requested by the user in this conversation turn. Use JSON when the result will be inspected programmatically:
+
+```bash
+nowdev-ai-toolbox-documentationsearch --json init --family australia --area scripting
+```
+
+For scripting-only coverage:
 
 ```bash
 nowdev-ai-toolbox-documentationsearch init --family australia --area scripting
@@ -86,7 +97,7 @@ Update an existing index incrementally:
 nowdev-ai-toolbox-documentationsearch update --family australia --area all-docs
 ```
 
-Do not use `--refresh` for routine updates. It re-embeds every discovered document. Use `--limit 5` for smoke tests.
+Do not use `--refresh` for routine updates. It re-embeds every discovered document. Use `--limit 5` for smoke tests. Treat a non-zero exit code or any item in the returned `failures` array as incomplete indexing, even when documents were committed successfully; report the failure count and paths before using the index for release-wide claims.
 
 Embedding uses the native ONNX Runtime CPU provider by default. On Windows, `--device dml` selects DirectML with a conservative default batch size; `--embedding-batch-size` can increase throughput when memory allows. Each passage sent to the model is capped at 2048 characters by default with `--embedding-max-characters`; full source content remains available through `get`. Changing the cap requires resetting and rebuilding the index because it changes document vectors. The provider automatically halves a batch after a native out-of-memory error and falls back to CPU if DirectML's device is lost or suspended. `--device webgpu` selects ONNX Runtime's experimental WebGPU provider, while `--device cpu` is the CPU fallback. Device selection changes where inference runs, not the vector dimensions, so changing devices does not require resetting an existing index. CPU inference defaults to using every logical core for ONNX Runtime's intra-op thread pool; use `--embedding-threads <count>` to cap that on a shared or resource-limited host.
 
