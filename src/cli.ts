@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-import { Command, InvalidArgumentError } from "commander";
+import { Command, InvalidArgumentError, Option } from "commander";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PACKAGE_VERSION } from "./config.js";
+import { DEFAULT_MAX_EMBEDDING_CHARACTERS, PACKAGE_VERSION } from "./config.js";
 import { resolvePaths } from "./config.js";
-import { HashEmbeddingProvider } from "./embedder.js";
+import { HashEmbeddingProvider, type EmbeddingDevice } from "./embedder.js";
 import { DocumentationSearch } from "./service-context.js";
 import type { ChunkType, DocType } from "./types.js";
 
@@ -13,6 +13,10 @@ interface GlobalOptions {
 	dataDir?: string;
 	json?: boolean;
 	deterministicEmbeddings?: boolean;
+	device?: EmbeddingDevice;
+	embeddingBatchSize?: number;
+	embeddingMaxCharacters?: number;
+	embeddingThreads?: number;
 }
 
 function integerOption(name: string, minimum: number, maximum: number) {
@@ -40,6 +44,10 @@ function createContext(command: Command): DocumentationSearch {
 	const options = command.optsWithGlobals<GlobalOptions>();
 	return new DocumentationSearch({
 		dataDirectory: options.dataDir,
+		embeddingDevice: options.device,
+		embeddingBatchSize: options.embeddingBatchSize,
+		embeddingMaxCharacters: options.embeddingMaxCharacters,
+		embeddingThreads: options.embeddingThreads,
 		embeddingProvider: options.deterministicEmbeddings ? new HashEmbeddingProvider() : undefined,
 	});
 }
@@ -76,6 +84,10 @@ const program = new Command()
 	.option("--data-dir <directory>", "override the local data directory")
 	.option("--json", "emit JSON")
 	.option("--deterministic-embeddings", "use lightweight hash embeddings for testing")
+	.addOption(new Option("--device <device>", "embedding execution device").choices(["cpu", "dml", "webgpu"]).default("cpu"))
+	.option("--embedding-batch-size <count>", "texts per embedding inference batch (default: 32 CPU, 8 DirectML)", integerOption("embedding-batch-size", 1, 1024))
+	.option(`--embedding-max-characters <count>`, `maximum characters sent to the embedding model per passage (default: ${DEFAULT_MAX_EMBEDDING_CHARACTERS})`, integerOption("embedding-max-characters", 256, 1_000_000))
+	.option("--embedding-threads <count>", "ONNX Runtime intra-op thread count for CPU inference (default: the host's logical core count)", integerOption("embedding-threads", 1, 1024))
 	.configureOutput({
 		outputError: (message, write) => {
 			if (process.argv.includes("--json")) write(`${JSON.stringify({ error: message.trim().replace(/^error:\s*/, "") })}\n`);
@@ -112,11 +124,13 @@ program.command("search")
 	.option("--topic-type <type>", "filter by topic type")
 	.option("--threshold <number>", "minimum cosine similarity for every result", numberOption("threshold", -1, 1), 0.3)
 	.option("--deduplicate-releases", "return only the best-scoring release of each source chunk")
+	.option("--max-per-source <count>", "maximum results from one source document", integerOption("max-per-source", 1, 10), 3)
 	.action(async (query, options, command) => withContext(command, async (context) => {
 		output(command, await context.search(query, {
 			limit: options.limit,
 			threshold: options.threshold,
 			deduplicateReleases: Boolean(options.deduplicateReleases),
+			maxResultsPerSource: options.maxPerSource,
 			release: options.family,
 			docType: options.docType as DocType | undefined,
 			publication: options.publication,
@@ -157,7 +171,7 @@ program.command("skill")
 	.option("--path", "print the installed SKILL.md path")
 	.action(async (options) => {
 		const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-		const skillPath = path.join(packageRoot, "skills", "documentationsearch", "SKILL.md");
+		const skillPath = path.join(packageRoot, "skills", "nowdev-ai-toolbox-documentationsearch", "SKILL.md");
 		console.log(options.path ? skillPath : await fs.readFile(skillPath, "utf8"));
 	});
 

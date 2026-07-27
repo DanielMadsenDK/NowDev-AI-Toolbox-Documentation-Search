@@ -24,6 +24,7 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 			limit: z.number().int().min(1).max(50).default(10),
 			threshold: z.number().min(-1).max(1).default(0.3),
 			deduplicateReleases: z.boolean().default(false),
+			maxResultsPerSource: z.number().int().min(1).max(10).default(3),
 			release: z.string().optional(),
 			docType: z.enum(["scripting-api", "rest-api", "scripting-guide", "developer-guide", "product-doc", "release-notes", "glossary"]).optional(),
 			publication: z.string().optional(),

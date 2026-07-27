@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { HashEmbeddingProvider } from "../src/embedder.js";
+import { HashEmbeddingProvider, type EmbeddingBatch } from "../src/embedder.js";
 import { GitHubDocumentationSource, type DocumentationArea, type SourceEntry, type SourceTree } from "../src/github.js";
 import { DocumentationSearch } from "../src/service-context.js";
 
@@ -56,12 +56,19 @@ class TwoDocumentSource extends GitHubDocumentationSource {
   }
 }
 
-class CountingEmbeddingProvider extends HashEmbeddingProvider {
+class StreamingEmbeddingProvider extends HashEmbeddingProvider {
   calls = 0;
+  afterBatch?: (batch: EmbeddingBatch) => void;
 
-  override async embed(texts: string[]): Promise<Float32Array[]> {
+  override async embedBatched(texts: string[], onBatch: (batch: EmbeddingBatch) => void | Promise<void>, onProgress?: (completed: number, total: number) => void): Promise<void> {
     this.calls += 1;
-    return super.embed(texts);
+    for (let index = 0; index < texts.length; index += 1) {
+      const [vector] = await super.embed([texts[index]!]);
+      const batch = { indexes: [index], vectors: [vector!], completed: index + 1, total: texts.length };
+      await onBatch(batch);
+      this.afterBatch?.(batch);
+      onProgress?.(batch.completed, batch.total);
+    }
   }
 }
 
@@ -101,14 +108,17 @@ describe("ServiceContext", () => {
     context.close();
   });
 
-  it("embeds chunks from multiple documents in one shared call", async () => {
+  it("commits each completed document while shared embedding is still running", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-batch-"));
     temporaryDirectories.push(directory);
-    const embeddings = new CountingEmbeddingProvider(32);
+    const embeddings = new StreamingEmbeddingProvider(32);
     const context = new DocumentationSearch({ dataDirectory: directory, embeddingProvider: embeddings, source: new TwoDocumentSource() });
+    const observedDocuments: number[] = [];
+    embeddings.afterBatch = () => observedDocuments.push(context.status().documents);
     const result = await context.update({ family: "australia" });
     expect(result).toMatchObject({ added: 2, chunks: 2, failures: [] });
     expect(embeddings.calls).toBe(1);
+    expect(observedDocuments).toEqual([1, 2]);
     context.close();
   });
 });

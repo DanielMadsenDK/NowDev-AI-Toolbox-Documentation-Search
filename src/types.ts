@@ -50,6 +50,7 @@ export interface SearchOptions extends SearchFilters {
   limit?: number;
   threshold?: number;
   deduplicateReleases?: boolean;
+  maxResultsPerSource?: number;
 }
 
 export interface SearchResult extends DocumentChunk {
@@ -69,6 +70,7 @@ export interface IndexManifest {
   normalized: boolean;
   documentPrefix?: string;
   queryPrefix?: string;
+  maxEmbeddingCharacters?: number;
   updatedAt: string;
   sourceCommit?: string;
 }

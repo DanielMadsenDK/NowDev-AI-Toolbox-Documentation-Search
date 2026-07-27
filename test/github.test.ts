@@ -39,6 +39,7 @@ describe("GitHubDocumentationSource", () => {
   });
 
   it("clones a branch once and reads changed files from shallow fetches", async () => {
+    // Two local git clone/commit round trips are noticeably slower on Windows filesystems than the 5s default.
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-git-"));
     temporaryDirectories.push(root);
     const origin = path.join(root, "origin");
@@ -63,5 +64,5 @@ describe("GitHubDocumentationSource", () => {
     const second = await source.discover("australia", "scripting");
     expect(second.entries[0]?.blobSha).not.toBe(first.entries[0]?.blobSha);
     expect(await source.download("australia", second.entries[0]!)).toContain("# Second");
-  });
+  }, 20_000);
 });

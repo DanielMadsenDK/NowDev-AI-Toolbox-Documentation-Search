@@ -99,7 +99,7 @@ export class GitHubDocumentationSource {
       await fs.rm(temporaryDirectory, { recursive: true, force: true });
       try {
         this.onRetry(`Creating shallow ServiceNowDocs clone for branch '${branch}'. This one-time download may take several minutes...`);
-        await this.git(["clone", "--depth", "1", "--single-branch", "--no-tags", "--branch", branch, this.repositoryUrl, temporaryDirectory]);
+        await this.git(["-c", "core.longpaths=true", "clone", "--depth", "1", "--single-branch", "--no-tags", "--branch", branch, this.repositoryUrl, temporaryDirectory]);
         await fs.rm(repositoryDirectory, { recursive: true, force: true });
         await fs.rename(temporaryDirectory, repositoryDirectory);
       } finally {
@@ -175,7 +175,7 @@ export class GitHubDocumentationSource {
   async download(branch: string, entry: SourceEntry): Promise<string> {
     if (this.activeRepository) {
       if (!included(entry.path, "all-docs")) throw new Error(`Invalid documentation path: ${entry.path}`);
-      return this.git(["show", `HEAD:${entry.path}`], this.activeRepository);
+      return fs.readFile(path.join(this.activeRepository, entry.path), "utf8");
     }
     const url = `https://raw.githubusercontent.com/${OWNER}/${REPOSITORY}/${encodeURIComponent(branch)}/${entry.path.split("/").map(encodeURIComponent).join("/")}`;
     return (await this.checkedFetch(url, entry.path)).text();

@@ -19,6 +19,8 @@ documentationsearch init --family australia
 
 The explicit `init` command creates a shallow, single-branch clone of ServiceNowDocs and downloads the quantized embedding model on first use. Nothing is downloaded by npm's installation lifecycle. Subsequent updates use one shallow Git fetch, compare Git blob SHAs, and embed only new or changed files. The clone also provides a consistent local snapshot when thousands of chunks are being generated. If Git synchronization is unavailable, DocumentationSearch falls back to the GitHub tree and raw-content APIs with retry handling.
 
+On Windows, the clone enables Git's long-path support so deeply nested documentation files can be checked out. If the local Git or Windows configuration still rejects a path, the source automatically falls back to GitHub API downloads.
+
 Document failures are isolated. Successfully indexed documents are committed, while each failed source is returned in the command result with its `download`, `chunk`, or `embed` stage and error. Failed sources are not marked as current, so the next `update` retries them automatically. If a previously indexed document changes but its replacement fails, the previous indexed version remains available until a later retry succeeds.
 
 ## CLI
@@ -34,7 +36,24 @@ documentationsearch status
 
 Use `--area scripting` to index only scripting references, or `--limit 5` for a smoke test. Use `--json` for machine-readable output.
 
-Search `--limit` accepts integers from 1 to 50. `--threshold` is the minimum cosine similarity for every returned result, including keyword matches, and accepts values from -1 to 1. Use `--deduplicate-releases` to retain only the highest-ranked release for each source path and chunk index when searching across multiple releases.
+Embedding runs on the native ONNX Runtime CPU provider by default. On Windows, DirectML is the most practical GPU option when your graphics driver supports it. DirectML defaults to a smaller batch and a token budget because transformer memory grows with both batch size and passage length; the provider automatically halves a batch after a native out-of-memory error:
+
+```bash
+documentationsearch --device dml init --family australia --area all-docs
+```
+
+Use `--embedding-batch-size 16` to trade more GPU memory for throughput when the default is stable. Each passage sent to the model is capped at 2048 characters by default to keep BGE inputs near its 512-token limit and avoid large padded tensors; the full source remains available through `get`. Adjust this with `--embedding-max-characters`. Changing the cap requires rebuilding the index with `reset-index --yes` because it changes document vectors. The provider halves a batch after an ordinary native out-of-memory error and falls back to CPU if DirectML suspends the GPU device. Use `--device webgpu` for ONNX Runtime's experimental WebGPU provider, or `--device cpu` to select the native CPU path explicitly. Device selection does not require rebuilding an existing index, but the same device option should be used for both indexing and searching when comparing performance. GPU provider initialization is environment-dependent; if it fails, rerun with `--device cpu`. `status` reports the active embedding device so a DirectML fallback is visible.
+
+CPU inference (including after a DirectML fallback) uses the host's full logical core count for ONNX Runtime's intra-op thread pool by default. Override this with `--embedding-threads <count>` on machines where using every core isn't appropriate, such as a shared server or a container with a CPU limit lower than the host's core count.
+
+Search `--limit` accepts integers from 1 to 50. `--threshold` is the minimum cosine similarity for every returned result, including keyword matches, and accepts values from -1 to 1. Results use hybrid reciprocal-rank fusion, weighted FTS5 title and heading matches, exact API object/method boosts, and query-aware chunk-type weighting. Results are limited to three chunks per source by default; adjust this with `--max-per-source` or use `--max-per-source 1` for more diverse results. Use `--deduplicate-releases` to retain only the highest-ranked release of each source path and chunk index when searching across multiple releases.
+
+The current index schema stores API object and method names as dedicated FTS5 fields, partitions the vector index by release so release-filtered searches only scan that release's shard, and prepares topic/API chunks at paragraph or code-line boundaries under the BGE input budget. Existing indexes from earlier releases must be removed and rebuilt:
+
+```bash
+documentationsearch reset-index --yes
+documentationsearch init --family australia --area all-docs
+```
 
 Data is stored in the operating system cache directory. Set `DOCUMENTATIONSEARCH_HOME` or pass `--data-dir` to choose another location. `SERVICECONTEXT_HOME` remains supported as a legacy alias. Set `GITHUB_TOKEN` when unauthenticated GitHub API rate limits are too restrictive.
 
@@ -84,7 +103,7 @@ Available tools:
 
 ## AI Skill
 
-The npm package includes an agent skill at `skills/documentationsearch/SKILL.md`. Print its installed path with:
+The npm package includes an agent skill at `skills/nowdev-ai-toolbox-documentationsearch/SKILL.md`. Print its installed path with:
 
 ```bash
 documentationsearch skill --path
@@ -99,17 +118,17 @@ documentationsearch skill
 For agents that discover project skills from `.github/skills`, install it in a workspace with:
 
 ```bash
-mkdir -p .github/skills/documentationsearch
-documentationsearch skill > .github/skills/documentationsearch/SKILL.md
+mkdir -p .github/skills/nowdev-ai-toolbox-documentationsearch
+documentationsearch skill > .github/skills/nowdev-ai-toolbox-documentationsearch/SKILL.md
 ```
 
 The skill teaches agents to inspect index status, use release-filtered hybrid search, retrieve full source documents, update documentation safely, interpret partial indexing failures, and prefer the MCP tools when available.
 
 ## Storage and Search
 
-inThe local SQLite database uses ordinary tables for metadata and update state, FTS5 for keyword retrieval, and `sqlite-vec` for cosine-distance vector retrieval. Reciprocal Rank Fusion and chunk-type weighting produce the final result order.
+The local SQLite database uses ordinary tables for metadata and update state, FTS5 for keyword retrieval, and `sqlite-vec` for cosine-distance vector retrieval. The vector index is partitioned by release, so a release-filtered search restricts the nearest-neighbor scan to that release's shard instead of ranking the whole index and filtering afterward. Reciprocal Rank Fusion and chunk-type weighting produce the final result order.
 
-The default model is `nomic-ai/nomic-embed-text-v1.5`, executed locally through Transformers.js with mean pooling, Nomic's required layer normalization, and normalized 768-dimensional embeddings. Indexed passages receive Nomic's `search_document: ` prefix and searches receive the `search_query: ` prefix. The provider also supports Nomic's Matryoshka dimensions through its `dimensions` option. Model files are cached and reused.
+The default model is `Xenova/bge-base-en-v1.5`, the Transformers.js-compatible ONNX distribution of `BAAI/bge-base-en-v1.5`. It runs locally with CLS pooling and normalized 768-dimensional embeddings. BGE passages receive no instruction prefix; searches receive `Represent this sentence for searching relevant passages: `. BGE's model card specifies a 512-token maximum input, so the default embedding input cap is 2048 characters. Model files are cached and reused.
 
 Indexing combines chunks from all changed documents into shared model batches. Chunks are grouped by approximate text length to reduce transformer padding, then vectors are restored to their original document order. Progress is reported throughout the embedding pass.
 

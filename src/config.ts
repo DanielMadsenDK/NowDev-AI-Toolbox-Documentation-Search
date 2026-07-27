@@ -1,14 +1,20 @@
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 
-export const PACKAGE_NAME = "@nowdevaitoolbox/documentationsearch";
-export const PACKAGE_VERSION = "0.1.0";
+const packageJson = createRequire(import.meta.url)("../package.json") as { name: string; version: string };
+
+export const PACKAGE_NAME = packageJson.name;
+export const PACKAGE_VERSION = packageJson.version;
 export const DEFAULT_FAMILY = "australia";
-export const DEFAULT_MODEL = "nomic-ai/nomic-embed-text-v1.5";
+export const DEFAULT_MODEL = "Xenova/bge-base-en-v1.5";
 export const DEFAULT_DIMENSIONS = 768;
-export const DEFAULT_POOLING = "mean";
-export const DEFAULT_DOCUMENT_PREFIX = "search_document: ";
-export const DEFAULT_QUERY_PREFIX = "search_query: ";
+export const DEFAULT_POOLING = "cls";
+export const DEFAULT_DEVICE = "cpu";
+export const DEFAULT_DOCUMENT_PREFIX = "";
+export const DEFAULT_QUERY_PREFIX = "Represent this sentence for searching relevant passages: ";
+export const DEFAULT_MAX_EMBEDDING_CHARACTERS = 2048;
+export const SEARCH_SCHEMA_VERSION = 3;
 
 export interface DocumentationSearchPaths {
   root: string;

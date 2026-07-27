@@ -54,4 +54,23 @@ describe("DocumentationSearchDatabase", () => {
     expect(database.search("incident", query, {}, 10, 0.9, true)).toHaveLength(1);
     database.close();
   });
+
+  it("prioritizes exact API identifiers and diversifies sources", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-ranking-"));
+    temporaryDirectories.push(directory);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 2);
+    const apiMarkdown = "---\ntitle: GlideRecord\n---\n# GlideRecord\n## GlideRecord - getValue(fieldName)\nReturns a field value.\n## GlideRecord - setValue(fieldName, value)\nSets a field value.";
+    const firstChunks = chunkDocument("markdown/api-reference/server-api-reference/gliderecord.md", apiMarkdown, "australia", "australia");
+    const secondChunks = chunkDocument("markdown/api-reference/server-api-reference/other.md", apiMarkdown.replaceAll("GlideRecord", "OtherRecord").replaceAll("getValue", "setValue"), "australia", "australia");
+    database.replaceSources("australia", [
+      { path: firstChunks[0]!.sourcePath, blobSha: "first", contentHash: firstChunks[0]!.contentHash, chunks: firstChunks, embeddings: firstChunks.map(() => Float32Array.from([1, 0])) },
+      { path: secondChunks[0]!.sourcePath, blobSha: "second", contentHash: secondChunks[0]!.contentHash, chunks: secondChunks, embeddings: secondChunks.map(() => Float32Array.from([1, 0])) },
+    ], []);
+    const results = database.search("getValue", Float32Array.from([1, 0]), { release: "australia" }, 4, 0, false, 1);
+    expect(results).toHaveLength(2);
+    expect(results[0]?.sourcePath).toBe(firstChunks[0]!.sourcePath);
+    expect(results[0]?.methodName).toBe("getValue");
+    expect(new Set(results.map((result) => result.sourcePath))).toHaveLength(2);
+    database.close();
+  });
 });

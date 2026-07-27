@@ -4,6 +4,15 @@
   "description": "DocumentationSearch: local-first ServiceNow documentation indexing and semantic search",
   "type": "module",
   "license": "MIT",
+  "author": "Daniel Aagren Seehartrai Madsen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DanielMadsenDK/NowDev-AI-Toolbox-Documentation-Search.git"
+  },
+  "homepage": "https://github.com/DanielMadsenDK/NowDev-AI-Toolbox-Documentation-Search#readme",
+  "bugs": {
+    "url": "https://github.com/DanielMadsenDK/NowDev-AI-Toolbox-Documentation-Search/issues"
+  },
   "publishConfig": {
     "access": "public"
   },

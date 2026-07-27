@@ -14,7 +14,7 @@ function runCli(args: string[]) {
 }
 
 beforeAll(async () => {
-  execFileSync("npm", ["run", "build"], { stdio: "ignore" });
+  execFileSync("npm", ["run", "build"], { stdio: "ignore", shell: process.platform === "win32" });
   dataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-cli-"));
   const database = new DocumentationSearchDatabase(path.join(dataDirectory, "index.sqlite"), 64);
   const embedder = new HashEmbeddingProvider(64);

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import YAML from "yaml";
+import { DEFAULT_MAX_EMBEDDING_CHARACTERS } from "./config.js";
 import type { ChunkType, DocType, DocumentChunk } from "./types.js";
 
 const API_PREFIXES = [
@@ -13,6 +14,8 @@ const GLOSSARY_PREFIX = "markdown/glossary/";
 const TOP_LEVEL_API = /^markdown\/api-reference\/[^/]+\.md$/;
 const METHOD_HEADING = /^##\s+(.+?)(?:\s+[-–—]\s*|\s*[-–—]\s+)(.+?)\s*$/;
 const CODE_FENCE = /```[\w+-]*\n([\s\S]*?)\n```/g;
+// Derived from the embedder's default character cap (config.ts), minus headroom for a document-embedding prefix, so the chunker's budget and the embedder's truncation (embedder.ts truncateEmbeddingText) can't silently drift apart and clip content mid-chunk.
+export const MAX_CHUNK_CHARACTERS = DEFAULT_MAX_EMBEDDING_CHARACTERS - 256;
 
 interface Frontmatter {
   [key: string]: unknown;
@@ -132,6 +135,72 @@ function firstParagraph(body: string): string {
   return result.join(" ").slice(0, 500);
 }
 
+function splitLongLine(line: string, maxCharacters: number): string[] {
+  const pieces: string[] = [];
+  let remaining = line.trim();
+  while (remaining.length > maxCharacters) {
+    let boundary = remaining.lastIndexOf(" ", maxCharacters);
+    if (boundary < Math.floor(maxCharacters * 0.5)) boundary = maxCharacters;
+    pieces.push(remaining.slice(0, boundary).trim());
+    remaining = remaining.slice(boundary).trim();
+  }
+  if (remaining) pieces.push(remaining);
+  return pieces;
+}
+
+const OVERLAP_CHARACTERS = 200;
+
+function overlapTail(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  const slice = text.slice(-limit);
+  const boundary = slice.indexOf(" ");
+  return boundary === -1 ? slice : slice.slice(boundary + 1);
+}
+
+export function splitChunkText(body: string, maxCharacters = MAX_CHUNK_CHARACTERS): string[] {
+  // Reserve headroom below maxCharacters so a forced split can carry a bit of the previous piece's trailing context into the next one, without either piece exceeding the caller's budget.
+  const packBudget = Math.max(256, maxCharacters - OVERLAP_CHARACTERS);
+  const blocks = body.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean);
+  const pieces: string[] = [];
+  for (const block of blocks) {
+    if (block.length <= packBudget) {
+      pieces.push(block);
+      continue;
+    }
+    for (const line of block.split("\n")) pieces.push(...splitLongLine(line, packBudget));
+  }
+  const chunks: string[] = [];
+  let current = "";
+  for (const piece of pieces) {
+    const candidate = current ? `${current}\n\n${piece}` : piece;
+    if (current && candidate.length > packBudget) {
+      chunks.push(current);
+      current = piece;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) chunks.push(current);
+  if (chunks.length <= 1) return chunks.length ? chunks : [""];
+  return chunks.map((chunk, index) => {
+    if (index === 0) return chunk;
+    const previousTail = overlapTail(chunks[index - 1]!, OVERLAP_CHARACTERS);
+    return previousTail ? `${previousTail}\n\n${chunk}`.slice(0, maxCharacters) : chunk;
+  });
+}
+
+function splitTopicContent(prefix: string, body: string): string[] {
+  const separator = body.trim() ? "\n\n" : "";
+  const budget = Math.max(256, MAX_CHUNK_CHARACTERS - prefix.length - separator.length);
+  return splitChunkText(body, budget).map((part) => `${prefix}${part ? `${separator}${part}` : ""}`);
+}
+
+function splitApiContent(label: string, objectName: string, methodName: string | null, signature: string | null, release: string, detail: string): string[] {
+  const prefix = `${apiContent(label, objectName, methodName, signature, release)}\n${label}: `;
+  const budget = Math.max(256, MAX_CHUNK_CHARACTERS - prefix.length);
+  return splitChunkText(detail, budget).map((part) => `${prefix}${part}`);
+}
+
 function extractExamples(body: string): string[] {
   return [...body.matchAll(CODE_FENCE)].map((match) => match[1]?.trim() ?? "").filter(Boolean);
 }
@@ -222,10 +291,14 @@ function chunkApiDoc(sourcePath: string, markdown: string, branch: string, famil
       metadata,
       contentHash: hash,
     });
-    append(docType === "rest-api" ? "endpoint" : "method", apiContent("Summary", position.objectName, methodName, position.signature, release, summary), methodMetadata);
-    parameters.forEach((parameter) => append("parameter", apiContent("Parameter", position.objectName, methodName, position.signature, release, `${parameter.name}: ${parameter.type}. ${parameter.description ?? ""}`.trim()), { ...methodMetadata, full_content: undefined, parameter }));
-    returns.forEach((result) => append("returns", apiContent("Returns", position.objectName, methodName, position.signature, release, `${result.type ?? ""}: ${result.description ?? ""}`.trim()), { ...methodMetadata, full_content: undefined, return: result }));
-    examples.forEach((example, exampleIndex) => append("example", apiContent("Example", position.objectName, methodName, position.signature, release, example), { ...methodMetadata, full_content: undefined, example, example_index: exampleIndex + 1 }));
+    const appendDetail = (chunkType: ChunkType, label: string, detail: string, metadata: Record<string, unknown>) => {
+      const contents = splitApiContent(label, position.objectName, methodName, position.signature, release, detail);
+      contents.forEach((content, partIndex) => append(chunkType, content, contents.length > 1 ? { ...metadata, chunk_part: partIndex + 1 } : metadata));
+    };
+    appendDetail(docType === "rest-api" ? "endpoint" : "method", "Summary", summary, methodMetadata);
+    parameters.forEach((parameter) => appendDetail("parameter", "Parameter", `${parameter.name}: ${parameter.type}. ${parameter.description ?? ""}`.trim(), { ...methodMetadata, full_content: undefined, parameter }));
+    returns.forEach((result) => appendDetail("returns", "Returns", `${result.type ?? ""}: ${result.description ?? ""}`.trim(), { ...methodMetadata, full_content: undefined, return: result }));
+    examples.forEach((example, exampleIndex) => appendDetail("example", "Example", example, { ...methodMetadata, full_content: undefined, example, example_index: exampleIndex + 1 }));
   }
   return chunks;
 }
@@ -266,11 +339,11 @@ function chunkTopicDoc(sourcePath: string, markdown: string, branch: string, fam
     `Release: ${release}`,
   ].filter(Boolean).join("\n");
   const overviewBody = lines.slice(0, firstHeading).join("\n").trim();
-  const chunks: DocumentChunk[] = [{ ...common, chunkType: "overview", chunkIndex: 0, heading: null, content: `${contentPrefix()}${overviewBody ? `\n\n${overviewBody.slice(0, 2500)}` : ""}`, metadata: { ...metadata, full_content: body } }];
+  const chunks: DocumentChunk[] = splitTopicContent(contentPrefix(), overviewBody).map((content, index) => ({ ...common, chunkType: "overview", chunkIndex: index, heading: null, content, metadata: { ...metadata, full_content: body } }));
   headings.forEach((item, index) => {
     const end = headings[index + 1]?.index ?? lines.length;
     const sectionBody = lines.slice(item.index + 1, end).join("\n").trim();
-    chunks.push({ ...common, chunkType: "section", chunkIndex: index + 1, heading: item.heading, content: `${contentPrefix(item.heading)}${sectionBody ? `\n\n${sectionBody.slice(0, 2500)}` : ""}`, metadata: { ...metadata, section_content: lines.slice(item.index, end).join("\n").trim() } });
+    splitTopicContent(contentPrefix(item.heading), sectionBody).forEach((content) => chunks.push({ ...common, chunkType: "section", chunkIndex: chunks.length, heading: item.heading, content, metadata: { ...metadata, section_content: lines.slice(item.index, end).join("\n").trim() } }));
   });
   return chunks;
 }

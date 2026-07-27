@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chunkDocument } from "../src/chunker.js";
+import { chunkDocument, MAX_CHUNK_CHARACTERS } from "../src/chunker.js";
 
 describe("chunkDocument", () => {
   it("creates focused method lookup chunks", () => {
@@ -70,5 +70,14 @@ Apache Jelly documentation.
     const [chunk] = chunkDocument("markdown/api-reference/scripts/c_ExtensionsToJellySyntax.md", markdown, "australia", "australia");
     expect(chunk?.metadata.description).toContain("three tags: <g:insert>");
     expect(chunk?.metadata.breadcrumb).toEqual(["Jelly tags", "Scripting", "API implementation"]);
+  });
+
+  it("splits long sections at paragraph boundaries without dropping the tail", () => {
+    const paragraphs = Array.from({ length: 80 }, (_, index) => `Paragraph ${index}: ${"retrieval guidance and configuration details ".repeat(8)}`).join("\n\n");
+    const chunks = chunkDocument("markdown/it-service-management/long-guide.md", `---\ntitle: Long guide\n---\n# Long guide\n## Configuration\n${paragraphs}`, "australia", "australia");
+    const sectionChunks = chunks.filter((chunk) => chunk.chunkType === "section");
+    expect(sectionChunks.length).toBeGreaterThan(1);
+    expect(sectionChunks.every((chunk) => chunk.content.length <= MAX_CHUNK_CHARACTERS)).toBe(true);
+    expect(sectionChunks.at(-1)?.content).toContain("Paragraph 79:");
   });
 });

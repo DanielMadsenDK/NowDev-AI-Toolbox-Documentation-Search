@@ -88,6 +88,12 @@ documentationsearch update --family australia --area all-docs
 
 Do not use `--refresh` for routine updates. It re-embeds every discovered document. Use `--limit 5` for smoke tests.
 
+Embedding uses the native ONNX Runtime CPU provider by default. On Windows, `--device dml` selects DirectML with a conservative default batch size; `--embedding-batch-size` can increase throughput when memory allows. Each passage sent to the model is capped at 2048 characters by default with `--embedding-max-characters`; full source content remains available through `get`. Changing the cap requires resetting and rebuilding the index because it changes document vectors. The provider automatically halves a batch after a native out-of-memory error and falls back to CPU if DirectML's device is lost or suspended. `--device webgpu` selects ONNX Runtime's experimental WebGPU provider, while `--device cpu` is the CPU fallback. Device selection changes where inference runs, not the vector dimensions, so changing devices does not require resetting an existing index. CPU inference defaults to using every logical core for ONNX Runtime's intra-op thread pool; use `--embedding-threads <count>` to cap that on a shared or resource-limited host.
+
+Search combines vector nearest-neighbor retrieval with FTS5 keyword retrieval. FTS5 weights titles and headings more heavily, recognizes multi-word phrases, and API object/method identifiers receive an exact-match boost. The vector index is partitioned by release, so a `--family`-filtered search only scans that release's shard instead of ranking the whole index and filtering afterward. Results default to at most three chunks per source document; use `--max-per-source` to change that. Use `--deduplicate-releases` when searching across releases and only one release of each source chunk is needed.
+
+The current search schema stores API object and method names as dedicated FTS5 fields and partitions the vector index by release. If the tool reports an older search schema, run `documentationsearch reset-index --yes` and re-index the requested release.
+
 Valid areas are `all-docs`, `scripting`, `server`, `client`, and `scripts`. The option is `--family`, not `--famly`.
 
 ## Handle failures
@@ -98,7 +104,7 @@ Report the failure count and relevant paths when indexing is incomplete. Do not 
 
 ## Embedding consistency
 
-Normal indexes use local `nomic-ai/nomic-embed-text-v1.5` embeddings with mean pooling, Nomic's required layer normalization, normalized 768-dimensional vectors, and Nomic's `search_document: ` and `search_query: ` retrieval prefixes. The provider supports Nomic's Matryoshka dimensions when configured explicitly. `--deterministic-embeddings` is only for tests and must be used consistently for both indexing and searching in a separate data directory. Never mix deterministic and Nomic indexes.
+Normal indexes use the Transformers.js-compatible `Xenova/bge-base-en-v1.5` distribution of `BAAI/bge-base-en-v1.5` with CLS pooling and normalized 768-dimensional vectors. BGE passages receive no instruction prefix; searches receive `Represent this sentence for searching relevant passages: `. BGE has a 512-token maximum input, and topic/API chunks are prepared at paragraph or code-line boundaries under a budget derived from the embedding cap (256 characters of headroom below it) so chunking and the embedding cap can't drift out of sync. The default embedding input cap is 2048 characters. `--deterministic-embeddings` is only for tests and must be used consistently for both indexing and searching in a separate data directory. Never mix deterministic and BGE indexes.
 
 When the configured model or pooling changes, rebuild the index. This removes SQLite data but preserves the model cache and shallow documentation clone:
 

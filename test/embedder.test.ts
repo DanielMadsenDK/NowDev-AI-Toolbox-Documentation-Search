@@ -1,5 +1,6 @@
+import os from "node:os";
 import { describe, expect, it } from "vitest";
-import { createEmbeddingBatches } from "../src/embedder.js";
+import { createEmbeddingBatches, TransformersEmbeddingProvider, truncateEmbeddingText } from "../src/embedder.js";
 
 describe("createEmbeddingBatches", () => {
   it("groups similarly sized texts while preserving original indices", () => {
@@ -12,5 +13,47 @@ describe("createEmbeddingBatches", () => {
     const restored = new Array<string>(texts.length);
     batches.flat().forEach((item) => { restored[item.index] = item.text; });
     expect(restored).toEqual(texts);
+  });
+
+  it("keeps estimated token usage within the batch budget", () => {
+    const batches = createEmbeddingBatches(["short", "x".repeat(40), "y".repeat(40)], 3, false, 12);
+    expect(batches.map((batch) => batch.length)).toEqual([2, 1]);
+  });
+
+  it("exposes the configured execution device and batch size", () => {
+    const provider = new TransformersEmbeddingProvider({ device: "webgpu", batchSize: 64 });
+    expect(provider.device).toBe("webgpu");
+    expect(provider.batchSize).toBe(64);
+  });
+
+  it("uses a conservative default batch size for DirectML", () => {
+    const provider = new TransformersEmbeddingProvider({ device: "dml" });
+    expect(provider.batchSize).toBe(8);
+    expect(provider.maxBatchTokens).toBe(4096);
+    expect(provider.maxEmbeddingCharacters).toBe(2048);
+  });
+
+  it("defaults CPU thread count to the host's logical cores and allows overriding it", () => {
+    const defaultProvider = new TransformersEmbeddingProvider();
+    expect(defaultProvider.threads).toBe(os.cpus().length);
+    const overriddenProvider = new TransformersEmbeddingProvider({ threads: 2 });
+    expect(overriddenProvider.threads).toBe(2);
+  });
+
+  it("uses the BGE embedding profile by default", () => {
+    const provider = new TransformersEmbeddingProvider();
+    expect(provider.model).toBe("Xenova/bge-base-en-v1.5");
+    expect(provider.dimensions).toBe(768);
+    expect(provider.pooling).toBe("cls");
+    expect(provider.layerNorm).toBe(false);
+    expect(provider.documentPrefix).toBe("");
+    expect(provider.queryPrefix).toBe("Represent this sentence for searching relevant passages: ");
+  });
+
+  it("caps only the text representation sent to the embedding model", () => {
+    const text = "prefix\n" + "x".repeat(20);
+    expect(truncateEmbeddingText(text, 12)).toBe("prefix\nxxxxx");
+    expect(truncateEmbeddingText(text, 0)).toBe(text);
+    expect(truncateEmbeddingText("short", 12)).toBe("short");
   });
 });
