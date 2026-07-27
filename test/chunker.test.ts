@@ -36,6 +36,79 @@ gr.chooseWindow(0, 10);
     expect(methodChunks.find((chunk) => chunk.chunkType === "method")?.content).toContain("Summary: Sets a range");
   });
 
+  it("extracts parameters and returns from ServiceNow's HTML table fallback", () => {
+    // ServiceNow renders parameter tables as raw HTML instead of GFM pipe tables whenever a
+    // cell holds a list or multiple paragraphs (e.g. GlideRecord.addQuery's operator list).
+    const markdown = `---
+title: GlideRecord - Global
+release: australia
+classification: server-api-reference
+---
+# GlideRecord - Global
+
+## GlideRecord - addQuery\\(String name, Object operator, Object value\\)
+
+Provides the ability to build a request.
+
+<table id="table_ix2_hvp_dt" class="parameters"><thead><tr><th>
+
+Name
+
+</th><th>
+
+Type
+
+</th><th>
+
+Description
+
+</th></tr></thead><tbody><tr><td>
+
+name
+
+</td><td>
+
+String
+
+</td><td>
+
+Table field name.
+
+</td></tr><tr><td>
+
+operator
+
+</td><td>
+
+Object
+
+</td><td>
+
+Query operator. Numbers:
+
+-   =
+-   &gt;
+-   &lt;
+
+</td></tr></tbody>
+</table>|Type|Description|
+|----|-----------|
+|GlideQueryCondition|Reference to the added condition.|
+
+\`\`\`
+gr.addQuery('active', true);
+\`\`\`
+`;
+    const chunks = chunkDocument("markdown/api-reference/server-api-reference/c_GlideRecordAPI.md", markdown, "australia", "australia");
+    const addQuery = chunks.filter((chunk) => chunk.methodName === "addQuery");
+    const parameters = addQuery.filter((chunk) => chunk.chunkType === "parameter");
+    expect(parameters).toHaveLength(2);
+    expect(parameters[0]?.content).toContain("name: String. Table field name.");
+    expect(parameters[1]?.content).toContain(">");
+    expect(parameters[1]?.content).toContain("<");
+    expect(addQuery.find((chunk) => chunk.chunkType === "returns")?.content).toContain("GlideQueryCondition");
+  });
+
   it("recognizes deprecated API titles", () => {
     const markdown = `---
 title: GlideEncrypter - Global \\(deprecated\\)

@@ -25,7 +25,7 @@ nowdev-ai-toolbox-documentationsearch --json status
 nowdev-ai-toolbox-documentationsearch --json search "GlideRecord query records" --family australia
 ```
 
-Assume the npm-installed `@nowdevaitoolbox/nowdev-ai-toolbox-documentationsearch` package is available globally and use the `nowdev-ai-toolbox-documentationsearch` command directly.
+Assume the npm-installed `@danielmadsendk/nowdev-ai-toolbox-documentationsearch` package is available globally and use the `nowdev-ai-toolbox-documentationsearch` command directly.
 
 ## Search workflow
 

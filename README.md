@@ -1,6 +1,6 @@
 # DocumentationSearch
 
-`@nowdevaitoolbox/nowdev-ai-toolbox-documentationsearch` downloads public ServiceNow documentation, builds a local semantic index, and exposes it through a Node.js API, CLI, or MCP server. PostgreSQL and hosted embedding credentials are not required.
+`@danielmadsendk/nowdev-ai-toolbox-documentationsearch` downloads public ServiceNow documentation, builds a local semantic index, and exposes it through a Node.js API, CLI, or MCP server. PostgreSQL and hosted embedding credentials are not required.
 
 ## Requirements
 
@@ -13,7 +13,7 @@ On supported Windows x64 and Node.js versions, npm downloads the prebuilt SQLite
 ## Install
 
 ```bash
-npm install --global @nowdevaitoolbox/nowdev-ai-toolbox-documentationsearch
+npm install --global @danielmadsendk/nowdev-ai-toolbox-documentationsearch
 nowdev-ai-toolbox-documentationsearch init --family australia
 ```
 
@@ -60,7 +60,7 @@ Data is stored in the operating system cache directory. Set `NOWDEV_AI_TOOLBOX_D
 ## Node API
 
 ```ts
-import { DocumentationSearch } from "@nowdevaitoolbox/nowdev-ai-toolbox-documentationsearch";
+import { DocumentationSearch } from "@danielmadsendk/nowdev-ai-toolbox-documentationsearch";
 
 const documentationSearch = new DocumentationSearch();
 await documentationSearch.update({ family: "australia", area: "scripting" });
@@ -84,7 +84,7 @@ Initialize the index before starting an MCP client, then configure the client to
   "mcpServers": {
     "nowdev-ai-toolbox-documentationsearch": {
       "command": "npx",
-      "args": ["-y", "@nowdevaitoolbox/nowdev-ai-toolbox-documentationsearch", "mcp"]
+      "args": ["-y", "@danielmadsendk/nowdev-ai-toolbox-documentationsearch", "mcp"]
     }
   }
 }

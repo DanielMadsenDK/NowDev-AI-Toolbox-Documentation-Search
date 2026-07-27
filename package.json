@@ -1,5 +1,5 @@
 {
-  "name": "@nowdevaitoolbox/nowdev-ai-toolbox-documentationsearch",
+  "name": "@danielmadsendk/nowdev-ai-toolbox-documentationsearch",
   "version": "0.1.0",
   "description": "DocumentationSearch: local-first ServiceNow documentation indexing and semantic search",
   "type": "module",
