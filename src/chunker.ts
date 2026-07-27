@@ -98,7 +98,18 @@ function extractTitle(body: string, frontmatter: Frontmatter): string {
 }
 
 function cleanCell(value: string): string {
-  return value.replace(/&nbsp;/g, " ").replace(/<[^>]+>/g, " ").replace(/[ \t]+/g, " ").trim();
+  // Tags are stripped before entities are decoded: once "&lt;"/"&gt;" become literal < >,
+  // a later <[^>]+> pass would misread them as real tag delimiters and eat everything between.
+  return value
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/[ \t]+/g, " ")
+    .trim();
 }
 
 function parseMarkdownTables(section: string): Array<Array<Record<string, string>>> {
@@ -118,6 +129,36 @@ function parseMarkdownTables(section: string): Array<Array<Record<string, string
     }
     if (rows.length) tables.push(rows);
     index = cursor - 1;
+  }
+  return tables;
+}
+
+// ServiceNow renders parameter/return tables as GitHub-flavored pipe tables only when every
+// cell is a single line. Cells with lists, notes, or multiple paragraphs (e.g. GlideRecord's
+// addQuery operator list) fall back to raw HTML <table> markup instead, which parseMarkdownTables
+// can't see. Cell bodies inside those HTML tables are themselves plain markdown, so once the
+// <th>/<td> wrapper is stripped they can reuse cleanCell like a pipe-table cell.
+const HTML_TABLE = /<table\b[^>]*>([\s\S]*?)<\/table>/gi;
+const HTML_ROW = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+const HTML_CELL = /<(th|td)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+
+function parseHtmlTables(section: string): Array<Array<Record<string, string>>> {
+  const tables: Array<Array<Record<string, string>>> = [];
+  for (const tableMatch of section.matchAll(HTML_TABLE)) {
+    let headers: string[] = [];
+    const rows: Array<Record<string, string>> = [];
+    for (const rowMatch of (tableMatch[1] ?? "").matchAll(HTML_ROW)) {
+      const cells = [...(rowMatch[1] ?? "").matchAll(HTML_CELL)];
+      if (!cells.length) continue;
+      if (cells[0]![1]!.toLowerCase() === "th") {
+        headers = cells.map((cell) => cleanCell(cell[2] ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, ""));
+        continue;
+      }
+      if (!headers.length) continue;
+      const values = cells.map((cell) => cleanCell(cell[2] ?? ""));
+      rows.push(Object.fromEntries(headers.map((key, i) => [key, values[i] ?? ""])));
+    }
+    if (rows.length) tables.push(rows);
   }
   return tables;
 }
@@ -267,7 +308,7 @@ function chunkApiDoc(sourcePath: string, markdown: string, branch: string, famil
     const section = lines.slice(position.index, end).join("\n").trim();
     const methodName = position.signature.replaceAll("\\(", "(").split("(")[0]!.trim();
     const summary = firstParagraph(lines.slice(position.index + 1, end).join("\n"));
-    const tables = parseMarkdownTables(section);
+    const tables = [...parseMarkdownTables(section), ...parseHtmlTables(section)];
     const parameters = tables.flat().filter((row) => "name" in row && "type" in row);
     const returns = tables.flat().filter((row) => !("name" in row) && ("type" in row || "property" in row || "properties" in row));
     const examples = extractExamples(section);
