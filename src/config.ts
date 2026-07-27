@@ -24,14 +24,13 @@ export interface DocumentationSearchPaths {
 }
 
 export function defaultDataDirectory(): string {
-  if (process.env.DOCUMENTATIONSEARCH_HOME) return path.resolve(process.env.DOCUMENTATIONSEARCH_HOME);
-  if (process.env.SERVICECONTEXT_HOME) return path.resolve(process.env.SERVICECONTEXT_HOME);
+  if (process.env.NOWDEV_AI_TOOLBOX_DOCUMENTATIONSEARCH_HOME) return path.resolve(process.env.NOWDEV_AI_TOOLBOX_DOCUMENTATIONSEARCH_HOME);
   const cacheRoot = process.platform === "win32"
     ? process.env.LOCALAPPDATA ?? os.homedir()
     : process.platform === "darwin"
       ? path.join(os.homedir(), "Library", "Caches")
       : process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache");
-  return path.join(cacheRoot, "documentationsearch");
+  return path.join(cacheRoot, "nowdev-ai-toolbox-documentationsearch");
 }
 
 export function resolvePaths(root = defaultDataDirectory()): DocumentationSearchPaths {

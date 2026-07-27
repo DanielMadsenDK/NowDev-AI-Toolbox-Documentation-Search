@@ -78,7 +78,7 @@ function addUpdateOptions(command: Command): Command {
 }
 
 const program = new Command()
-	.name("documentationsearch")
+	.name("nowdev-ai-toolbox-documentationsearch")
 	.description("Download, index, and semantically search ServiceNow documentation locally")
 	.version(PACKAGE_VERSION)
 	.option("--data-dir <directory>", "override the local data directory")

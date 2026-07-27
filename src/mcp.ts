@@ -13,7 +13,7 @@ function result(value: unknown) {
 }
 
 export async function startMcpServer(dataDirectory?: string): Promise<void> {
-	const context = new DocumentationSearch({ dataDirectory: dataDirectory ?? process.env.DOCUMENTATIONSEARCH_HOME ?? process.env.SERVICECONTEXT_HOME });
+	const context = new DocumentationSearch({ dataDirectory: dataDirectory ?? process.env.NOWDEV_AI_TOOLBOX_DOCUMENTATIONSEARCH_HOME });
 	const server = new McpServer({ name: PACKAGE_NAME, version: PACKAGE_VERSION });
 
 	server.registerTool("search_servicenow_docs", {
@@ -55,20 +55,12 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 		annotations: { readOnlyHint: true, idempotentHint: true },
 	}, async ({ release }) => result(context.listPublications(release)));
 
-	const statusHandler = async () => result(context.status());
 	server.registerTool("get_documentation_search_status", {
 		title: "Get DocumentationSearch status",
 		description: "Inspect local index size, releases, location, and embedding model configuration.",
 		inputSchema: z.object({}),
 		annotations: { readOnlyHint: true, idempotentHint: true },
-	}, statusHandler);
-
-	server.registerTool("get_servicecontext_status", {
-		title: "Get DocumentationSearch status (legacy alias)",
-		description: "Deprecated alias for get_documentation_search_status.",
-		inputSchema: z.object({}),
-		annotations: { readOnlyHint: true, idempotentHint: true },
-	}, statusHandler);
+	}, async () => result(context.status()));
 
 	server.registerTool("update_servicenow_docs", {
 		title: "Update ServiceNow documentation",

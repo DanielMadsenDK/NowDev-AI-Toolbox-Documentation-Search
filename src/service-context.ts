@@ -109,7 +109,7 @@ export class DocumentationSearch {
     const manifest = this.database.manifest();
     if (manifest && manifest.schemaVersion !== SEARCH_SCHEMA_VERSION) {
       this.database.close();
-      throw new Error(`Index uses search schema ${manifest.schemaVersion}, but the active schema is ${SEARCH_SCHEMA_VERSION}. Run documentationsearch reset-index --yes before rebuilding.`);
+      throw new Error(`Index uses search schema ${manifest.schemaVersion}, but the active schema is ${SEARCH_SCHEMA_VERSION}. Run nowdev-ai-toolbox-documentationsearch reset-index --yes before rebuilding.`);
     }
     if (manifest && (
       manifest.embeddingProvider !== this.embeddings.name
@@ -122,7 +122,7 @@ export class DocumentationSearch {
       || (manifest.maxEmbeddingCharacters ?? Number.POSITIVE_INFINITY) !== (this.embeddings.maxEmbeddingCharacters ?? Number.POSITIVE_INFINITY)
     )) {
       this.database.close();
-      throw new Error(`Index was built with ${manifest.embeddingProvider}/${manifest.embeddingModel} (${manifest.dimensions} dimensions, ${manifest.pooling} pooling), but the active provider is ${this.embeddings.name}/${this.embeddings.model} (${this.embeddings.dimensions} dimensions, ${this.embeddings.pooling ?? "mean"} pooling). Use a separate data directory or run documentationsearch reset-index --yes before rebuilding.`);
+      throw new Error(`Index was built with ${manifest.embeddingProvider}/${manifest.embeddingModel} (${manifest.dimensions} dimensions, ${manifest.pooling} pooling), but the active provider is ${this.embeddings.name}/${this.embeddings.model} (${this.embeddings.dimensions} dimensions, ${this.embeddings.pooling ?? "mean"} pooling). Use a separate data directory or run nowdev-ai-toolbox-documentationsearch reset-index --yes before rebuilding.`);
     }
   }
 

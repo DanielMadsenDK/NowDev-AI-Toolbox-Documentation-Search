@@ -18,27 +18,27 @@ Prefer these MCP tools when they are available:
 - `list_servicenow_publications`
 - `update_servicenow_docs`
 
-Otherwise use the `documentationsearch` CLI. Put global options before the command and request JSON for machine-readable output:
+Otherwise use the `nowdev-ai-toolbox-documentationsearch` CLI. Put global options before the command and request JSON for machine-readable output:
 
 ```bash
-documentationsearch --json status
-documentationsearch --json search "GlideRecord query records" --family australia
+nowdev-ai-toolbox-documentationsearch --json status
+nowdev-ai-toolbox-documentationsearch --json search "GlideRecord query records" --family australia
 ```
 
-Assume the npm-installed `@nowdevaitoolbox/documentationsearch` package is available globally and use the `documentationsearch` command directly.
+Assume the npm-installed `@nowdevaitoolbox/nowdev-ai-toolbox-documentationsearch` package is available globally and use the `nowdev-ai-toolbox-documentationsearch` command directly.
 
 ## Search workflow
 
 1. Inspect status before searching:
 
    ```bash
-   documentationsearch --json status
+   nowdev-ai-toolbox-documentationsearch --json status
    ```
 
 2. If the requested release is indexed, search with a release filter:
 
    ```bash
-   documentationsearch --json search "natural-language query" --family australia --limit 10
+   nowdev-ai-toolbox-documentationsearch --json search "natural-language query" --family australia --limit 10
    ```
 
    If the requested release is not indexed, inform the user which releases are available, ask whether to proceed with the closest available release or initialize the requested one, and do not guess at release-specific behavior.
@@ -46,13 +46,13 @@ Assume the npm-installed `@nowdevaitoolbox/documentationsearch` package is avail
 3. Use the highest-similarity result's exact `sourcePath` to inspect its structure:
 
    ```bash
-   documentationsearch --json get "SOURCE_PATH" --family australia --outline
+   nowdev-ai-toolbox-documentationsearch --json get "SOURCE_PATH" --family australia --outline
    ```
 
 4. Retrieve full content only for the same source selected in step 3:
 
    ```bash
-   documentationsearch --json get "SOURCE_PATH" --family australia
+   nowdev-ai-toolbox-documentationsearch --json get "SOURCE_PATH" --family australia
    ```
 
 5. Cite or name the source path and release in the answer. Distinguish documented behavior from inference.
@@ -71,19 +71,19 @@ The threshold is a minimum cosine similarity for every returned result, includin
 If status shows no documents, ask before starting a large download unless the user explicitly requested indexing. For scripting-only coverage:
 
 ```bash
-documentationsearch init --family australia --area scripting
+nowdev-ai-toolbox-documentationsearch init --family australia --area scripting
 ```
 
 For a complete family release:
 
 ```bash
-documentationsearch init --family australia --area all-docs
+nowdev-ai-toolbox-documentationsearch init --family australia --area all-docs
 ```
 
 Update an existing index incrementally:
 
 ```bash
-documentationsearch update --family australia --area all-docs
+nowdev-ai-toolbox-documentationsearch update --family australia --area all-docs
 ```
 
 Do not use `--refresh` for routine updates. It re-embeds every discovered document. Use `--limit 5` for smoke tests.
@@ -92,7 +92,7 @@ Embedding uses the native ONNX Runtime CPU provider by default. On Windows, `--d
 
 Search combines vector nearest-neighbor retrieval with FTS5 keyword retrieval. FTS5 weights titles and headings more heavily, recognizes multi-word phrases, and API object/method identifiers receive an exact-match boost. The vector index is partitioned by release, so a `--family`-filtered search only scans that release's shard instead of ranking the whole index and filtering afterward. Results default to at most three chunks per source document; use `--max-per-source` to change that. Use `--deduplicate-releases` when searching across releases and only one release of each source chunk is needed.
 
-The current search schema stores API object and method names as dedicated FTS5 fields and partitions the vector index by release. If the tool reports an older search schema, run `documentationsearch reset-index --yes` and re-index the requested release.
+The current search schema stores API object and method names as dedicated FTS5 fields and partitions the vector index by release. If the tool reports an older search schema, run `nowdev-ai-toolbox-documentationsearch reset-index --yes` and re-index the requested release.
 
 Valid areas are `all-docs`, `scripting`, `server`, `client`, and `scripts`. The option is `--family`, not `--famly`.
 
@@ -109,8 +109,8 @@ Normal indexes use the Transformers.js-compatible `Xenova/bge-base-en-v1.5` dist
 When the configured model or pooling changes, rebuild the index. This removes SQLite data but preserves the model cache and shallow documentation clone:
 
 ```bash
-documentationsearch reset-index --yes
-documentationsearch init --family australia --area all-docs
+nowdev-ai-toolbox-documentationsearch reset-index --yes
+nowdev-ai-toolbox-documentationsearch init --family australia --area all-docs
 ```
 
-The default data directory is platform-specific and is shown by `status`. On Linux it is normally `~/.cache/documentationsearch`. The legacy `SERVICECONTEXT_HOME` variable remains supported for existing caches.
+The default data directory is platform-specific and is shown by `status`. On Linux it is normally `~/.cache/nowdev-ai-toolbox-documentationsearch`. Set `NOWDEV_AI_TOOLBOX_DOCUMENTATIONSEARCH_HOME` to override it.

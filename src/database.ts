@@ -152,7 +152,7 @@ export class DocumentationSearchDatabase {
     this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS document_vectors USING vec0(embedding float[${this.dimensions}] distance_metric=cosine, release text partition key)`);
     const vectorSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'document_vectors'").pluck().get() as string | undefined;
     if (!vectorSchema?.includes("distance_metric=cosine")) {
-      throw new Error("Index uses the legacy L2 vector metric. Remove the index and run documentationsearch init to rebuild it with cosine distance.");
+      throw new Error("Index uses the legacy L2 vector metric. Remove the index and run nowdev-ai-toolbox-documentationsearch init to rebuild it with cosine distance.");
     }
     if (!vectorSchema.includes("partition key")) {
       throw new Error("Index predates release-partitioned vector search. Run reset-index --yes and re-index the documentation.");

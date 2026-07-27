@@ -1,6 +1,6 @@
 # DocumentationSearch
 
-`@nowdevaitoolbox/documentationsearch` downloads public ServiceNow documentation, builds a local semantic index, and exposes it through a Node.js API, CLI, or MCP server. PostgreSQL and hosted embedding credentials are not required.
+`@nowdevaitoolbox/nowdev-ai-toolbox-documentationsearch` downloads public ServiceNow documentation, builds a local semantic index, and exposes it through a Node.js API, CLI, or MCP server. PostgreSQL and hosted embedding credentials are not required.
 
 ## Requirements
 
@@ -13,8 +13,8 @@ On supported Windows x64 and Node.js versions, npm downloads the prebuilt SQLite
 ## Install
 
 ```bash
-npm install --global @nowdevaitoolbox/documentationsearch
-documentationsearch init --family australia
+npm install --global @nowdevaitoolbox/nowdev-ai-toolbox-documentationsearch
+nowdev-ai-toolbox-documentationsearch init --family australia
 ```
 
 The explicit `init` command creates a shallow, single-branch clone of ServiceNowDocs and downloads the quantized embedding model on first use. Nothing is downloaded by npm's installation lifecycle. Subsequent updates use one shallow Git fetch, compare Git blob SHAs, and embed only new or changed files. The clone also provides a consistent local snapshot when thousands of chunks are being generated. If Git synchronization is unavailable, DocumentationSearch falls back to the GitHub tree and raw-content APIs with retry handling.
@@ -26,12 +26,12 @@ Document failures are isolated. Successfully indexed documents are committed, wh
 ## CLI
 
 ```bash
-documentationsearch update --family australia
-documentationsearch search "query active incidents assigned to a user" --family australia
-documentationsearch get markdown/api-reference/server-api-reference/c_GlideRecordAPI.md --family australia
-documentationsearch get markdown/api-reference/server-api-reference/c_GlideRecordAPI.md --outline
-documentationsearch publications --family australia
-documentationsearch status
+nowdev-ai-toolbox-documentationsearch update --family australia
+nowdev-ai-toolbox-documentationsearch search "query active incidents assigned to a user" --family australia
+nowdev-ai-toolbox-documentationsearch get markdown/api-reference/server-api-reference/c_GlideRecordAPI.md --family australia
+nowdev-ai-toolbox-documentationsearch get markdown/api-reference/server-api-reference/c_GlideRecordAPI.md --outline
+nowdev-ai-toolbox-documentationsearch publications --family australia
+nowdev-ai-toolbox-documentationsearch status
 ```
 
 Use `--area scripting` to index only scripting references, or `--limit 5` for a smoke test. Use `--json` for machine-readable output.
@@ -39,7 +39,7 @@ Use `--area scripting` to index only scripting references, or `--limit 5` for a 
 Embedding runs on the native ONNX Runtime CPU provider by default. On Windows, DirectML is the most practical GPU option when your graphics driver supports it. DirectML defaults to a smaller batch and a token budget because transformer memory grows with both batch size and passage length; the provider automatically halves a batch after a native out-of-memory error:
 
 ```bash
-documentationsearch --device dml init --family australia --area all-docs
+nowdev-ai-toolbox-documentationsearch --device dml init --family australia --area all-docs
 ```
 
 Use `--embedding-batch-size 16` to trade more GPU memory for throughput when the default is stable. Each passage sent to the model is capped at 2048 characters by default to keep BGE inputs near its 512-token limit and avoid large padded tensors; the full source remains available through `get`. Adjust this with `--embedding-max-characters`. Changing the cap requires rebuilding the index with `reset-index --yes` because it changes document vectors. The provider halves a batch after an ordinary native out-of-memory error and falls back to CPU if DirectML suspends the GPU device. Use `--device webgpu` for ONNX Runtime's experimental WebGPU provider, or `--device cpu` to select the native CPU path explicitly. Device selection does not require rebuilding an existing index, but the same device option should be used for both indexing and searching when comparing performance. GPU provider initialization is environment-dependent; if it fails, rerun with `--device cpu`. `status` reports the active embedding device so a DirectML fallback is visible.
@@ -51,18 +51,16 @@ Search `--limit` accepts integers from 1 to 50. `--threshold` is the minimum cos
 The current index schema stores API object and method names as dedicated FTS5 fields, partitions the vector index by release so release-filtered searches only scan that release's shard, and prepares topic/API chunks at paragraph or code-line boundaries under the BGE input budget. Existing indexes from earlier releases must be removed and rebuilt:
 
 ```bash
-documentationsearch reset-index --yes
-documentationsearch init --family australia --area all-docs
+nowdev-ai-toolbox-documentationsearch reset-index --yes
+nowdev-ai-toolbox-documentationsearch init --family australia --area all-docs
 ```
 
-Data is stored in the operating system cache directory. Set `DOCUMENTATIONSEARCH_HOME` or pass `--data-dir` to choose another location. `SERVICECONTEXT_HOME` remains supported as a legacy alias. Set `GITHUB_TOKEN` when unauthenticated GitHub API rate limits are too restrictive.
-
-Legacy CLI binaries, environment variables, TypeScript class exports, and the old MCP status tool remain available as migration aliases. To use an existing cache that has not been moved, set `SERVICECONTEXT_HOME` to its path or move it to the new default cache directory before starting DocumentationSearch.
+Data is stored in the operating system cache directory. Set `NOWDEV_AI_TOOLBOX_DOCUMENTATIONSEARCH_HOME` or pass `--data-dir` to choose another location. Set `GITHUB_TOKEN` when unauthenticated GitHub API rate limits are too restrictive.
 
 ## Node API
 
 ```ts
-import { DocumentationSearch } from "@nowdevaitoolbox/documentationsearch";
+import { DocumentationSearch } from "@nowdevaitoolbox/nowdev-ai-toolbox-documentationsearch";
 
 const documentationSearch = new DocumentationSearch();
 await documentationSearch.update({ family: "australia", area: "scripting" });
@@ -75,7 +73,7 @@ const results = await documentationSearch.search("GlideRecord pagination", {
 documentationSearch.close();
 ```
 
-`DocumentationSearch` accepts a custom `EmbeddingProvider`, allowing hosted or organization-specific models without changing storage or ranking. `ServiceContext` remains exported as a deprecated compatibility alias. Changing embedding dimensions requires a separate data directory or rebuilding the index.
+`DocumentationSearch` accepts a custom `EmbeddingProvider`, allowing hosted or organization-specific models without changing storage or ranking. Changing embedding dimensions requires a separate data directory or rebuilding the index.
 
 ## MCP
 
@@ -84,9 +82,9 @@ Initialize the index before starting an MCP client, then configure the client to
 ```json
 {
   "mcpServers": {
-    "documentationsearch": {
+    "nowdev-ai-toolbox-documentationsearch": {
       "command": "npx",
-      "args": ["-y", "@nowdevaitoolbox/documentationsearch", "mcp"]
+      "args": ["-y", "@nowdevaitoolbox/nowdev-ai-toolbox-documentationsearch", "mcp"]
     }
   }
 }
@@ -106,20 +104,20 @@ Available tools:
 The npm package includes an agent skill at `skills/nowdev-ai-toolbox-documentationsearch/SKILL.md`. Print its installed path with:
 
 ```bash
-documentationsearch skill --path
+nowdev-ai-toolbox-documentationsearch skill --path
 ```
 
 Print the complete skill to standard output with:
 
 ```bash
-documentationsearch skill
+nowdev-ai-toolbox-documentationsearch skill
 ```
 
 For agents that discover project skills from `.github/skills`, install it in a workspace with:
 
 ```bash
 mkdir -p .github/skills/nowdev-ai-toolbox-documentationsearch
-documentationsearch skill > .github/skills/nowdev-ai-toolbox-documentationsearch/SKILL.md
+nowdev-ai-toolbox-documentationsearch skill > .github/skills/nowdev-ai-toolbox-documentationsearch/SKILL.md
 ```
 
 The skill teaches agents to inspect index status, use release-filtered hybrid search, retrieve full source documents, update documentation safely, interpret partial indexing failures, and prefer the MCP tools when available.
@@ -135,8 +133,8 @@ Indexing combines chunks from all changed documents into shared model batches. C
 An index created with another model or pooling strategy must be rebuilt. Preserve the documentation clone and downloaded models while removing only SQLite index files with:
 
 ```bash
-documentationsearch reset-index --yes
-documentationsearch init --family australia --area all-docs
+nowdev-ai-toolbox-documentationsearch reset-index --yes
+nowdev-ai-toolbox-documentationsearch init --family australia --area all-docs
 ```
 
 For lightweight tests, `--deterministic-embeddings` uses a deterministic hash vector. It is not a substitute for semantic embeddings and must use a separate data directory from the default model.

@@ -130,7 +130,7 @@ export class GitHubDocumentationSource {
         response = await fetch(url, {
           headers: {
             Accept: "application/vnd.github+json",
-            "User-Agent": "documentationsearch",
+            "User-Agent": "nowdev-ai-toolbox-documentationsearch",
             ...(process.env.GITHUB_TOKEN ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}),
           },
           signal: AbortSignal.timeout(this.timeoutMilliseconds),

@@ -12,7 +12,7 @@ describe("bundled DocumentationSearch skill", () => {
     const metadata = YAML.parse(match![1]!) as { name?: string; description?: string };
     expect(metadata.name).toBe("nowdev-ai-toolbox-documentationsearch");
     expect(metadata.description).toContain("ServiceNow documentation");
-    expect(content).toContain("documentationsearch --json status");
+    expect(content).toContain("nowdev-ai-toolbox-documentationsearch --json status");
     expect(content).toContain("search_servicenow_docs");
     expect(content).toContain("failures");
     expect(content).toContain("bge-base-en-v1.5");

@@ -29,7 +29,7 @@ beforeAll(async () => {
 
 afterAll(() => fs.rmSync(dataDirectory, { recursive: true, force: true }));
 
-describe("documentationsearch CLI", () => {
+describe("nowdev-ai-toolbox-documentationsearch CLI", () => {
   it.each([
     ["search limit", ["search", "GlideQuery", "--limit", "nope"], "limit must be an integer"],
     ["search threshold", ["search", "GlideQuery", "--threshold", "nope"], "threshold must be a finite number"],

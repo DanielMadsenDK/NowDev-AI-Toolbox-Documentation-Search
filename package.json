@@ -1,5 +1,5 @@
 {
-  "name": "@nowdevaitoolbox/documentationsearch",
+  "name": "@nowdevaitoolbox/nowdev-ai-toolbox-documentationsearch",
   "version": "0.1.0",
   "description": "DocumentationSearch: local-first ServiceNow documentation indexing and semantic search",
   "type": "module",
@@ -27,10 +27,8 @@
     "node": ">=20.12"
   },
   "bin": {
-    "documentationsearch": "./dist/cli.js",
-    "documentationsearch-mcp": "./dist/mcp.js",
-    "servicecontext": "./dist/cli.js",
-    "servicecontext-mcp": "./dist/mcp.js"
+    "nowdev-ai-toolbox-documentationsearch": "./dist/cli.js",
+    "nowdev-ai-toolbox-documentationsearch-mcp": "./dist/mcp.js"
   },
   "exports": {
     ".": {
