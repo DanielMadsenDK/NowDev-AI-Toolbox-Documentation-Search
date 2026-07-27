@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import Database from "better-sqlite3";
+import Database from "libsql";
 import * as sqliteVec from "sqlite-vec";
 import type { DocumentChunk, IndexManifest, SearchFilters, SearchResult } from "./types.js";
 
@@ -13,9 +13,9 @@ export function readStoredEmbeddingProfile(filename: string): string | null {
   if (!fs.existsSync(filename)) return null;
   const database = new Database(filename, { readonly: true, fileMustExist: true });
   try {
-    const hasSettings = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings'").pluck().get();
+    const hasSettings = database.prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'settings'").get() as { found: number } | undefined;
     if (!hasSettings) return null;
-    return database.prepare("SELECT value FROM settings WHERE key = 'embedding_profile'").pluck().get() as string | undefined ?? null;
+    return (database.prepare("SELECT value FROM settings WHERE key = 'embedding_profile'").get() as { value: string } | undefined)?.value ?? null;
   } finally {
     database.close();
   }
@@ -169,11 +169,11 @@ export class DocumentationSearchDatabase {
       CREATE INDEX IF NOT EXISTS idx_documents_filters ON documents(release, doc_type, publication, chunk_type, topic_type);
       CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(title, heading, object_name, method_name, content);
     `);
-    const ftsSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'documents_fts'").pluck().get() as string | undefined;
+    const ftsSchema = (this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'documents_fts'").get() as { sql: string } | undefined)?.sql;
     if (!ftsSchema?.includes("object_name") || !ftsSchema.includes("method_name")) {
       throw new Error("Index uses an older search schema. Run reset-index --yes and re-index the documentation.");
     }
-    const storedDimensions = this.db.prepare("SELECT value FROM settings WHERE key = 'dimensions'").pluck().get() as string | undefined;
+    const storedDimensions = (this.db.prepare("SELECT value FROM settings WHERE key = 'dimensions'").get() as { value: string } | undefined)?.value;
     if (storedDimensions && Number(storedDimensions) !== this.dimensions) {
       throw new Error(`Index uses ${storedDimensions}-dimensional embeddings, but provider uses ${this.dimensions}. Remove the index or use a matching model.`);
     }
@@ -186,7 +186,7 @@ export class DocumentationSearchDatabase {
       chunk_type text,
       topic_type text
     )`);
-    const vectorSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'document_vectors'").pluck().get() as string | undefined;
+    const vectorSchema = (this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'document_vectors'").get() as { sql: string } | undefined)?.sql;
     if (!vectorSchema?.includes("distance_metric=cosine")) {
       throw new Error("Index uses the legacy L2 vector metric. Remove the index and run nowdev-ai-toolbox-documentationsearch init to rebuild it with cosine distance.");
     }
@@ -203,7 +203,7 @@ export class DocumentationSearchDatabase {
   }
 
   embeddingProfile(): string | null {
-    return this.db.prepare("SELECT value FROM settings WHERE key = 'embedding_profile'").pluck().get() as string | undefined ?? null;
+    return (this.db.prepare("SELECT value FROM settings WHERE key = 'embedding_profile'").get() as { value: string } | undefined)?.value ?? null;
   }
 
   setEmbeddingProfile(profile: string): void {
@@ -215,24 +215,25 @@ export class DocumentationSearchDatabase {
     return new Map(rows.map((row) => [row.source_path, { blobSha: row.blob_sha, contentHash: row.content_hash }]));
   }
 
-  replaceSources(release: string, sources: Array<{ path: string; blobSha: string; contentHash: string; chunks: DocumentChunk[]; embeddings: Float32Array[] }>, deletedPaths: string[]): void {
-    const remove = this.db.transaction((sourcePaths: string[]) => {
-      const ids = this.db.prepare("SELECT id FROM documents WHERE release = ? AND source_path = ?");
-      const deleteVector = this.db.prepare("DELETE FROM document_vectors WHERE rowid = ?");
-      const deleteFts = this.db.prepare("DELETE FROM documents_fts WHERE rowid = ?");
-      const deleteDocs = this.db.prepare("DELETE FROM documents WHERE release = ? AND source_path = ?");
-      const deleteSource = this.db.prepare("DELETE FROM sources WHERE release = ? AND source_path = ?");
-      for (const sourcePath of sourcePaths) {
-        for (const row of ids.all(release, sourcePath) as Array<{ id: number }>) {
-          deleteVector.run(row.id);
-          deleteFts.run(row.id);
-        }
-        deleteDocs.run(release, sourcePath);
-        deleteSource.run(release, sourcePath);
+  private removeSources(release: string, sourcePaths: string[]): void {
+    const ids = this.db.prepare("SELECT id FROM documents WHERE release = ? AND source_path = ?");
+    const deleteVector = this.db.prepare("DELETE FROM document_vectors WHERE rowid = ?");
+    const deleteFts = this.db.prepare("DELETE FROM documents_fts WHERE rowid = ?");
+    const deleteDocs = this.db.prepare("DELETE FROM documents WHERE release = ? AND source_path = ?");
+    const deleteSource = this.db.prepare("DELETE FROM sources WHERE release = ? AND source_path = ?");
+    for (const sourcePath of sourcePaths) {
+      for (const row of ids.all(release, sourcePath) as Array<{ id: number }>) {
+        deleteVector.run(row.id);
+        deleteFts.run(row.id);
       }
-    });
+      deleteDocs.run(release, sourcePath);
+      deleteSource.run(release, sourcePath);
+    }
+  }
+
+  replaceSources(release: string, sources: Array<{ path: string; blobSha: string; contentHash: string; chunks: DocumentChunk[]; embeddings: Float32Array[] }>, deletedPaths: string[]): void {
     const insert = this.db.transaction(() => {
-      remove([...deletedPaths, ...sources.map((source) => source.path)]);
+      this.removeSources(release, [...deletedPaths, ...sources.map((source) => source.path)]);
       const insertDocument = this.db.prepare(`INSERT INTO documents (
         doc_type, publication, source_path, release, chunk_type, chunk_index, title, heading,
         content, topic_type, product, classification, last_updated, object_name, method_name, metadata, content_hash
@@ -356,8 +357,8 @@ export class DocumentationSearchDatabase {
   }
 
   stats(): { documents: number; chunks: number; releases: string[] } {
-    const chunks = this.db.prepare("SELECT COUNT(*) FROM documents").pluck().get() as number;
-    const documents = this.db.prepare("SELECT COUNT(*) FROM sources").pluck().get() as number;
+    const chunks = (this.db.prepare("SELECT COUNT(*) AS count FROM documents").get() as { count: number }).count;
+    const documents = (this.db.prepare("SELECT COUNT(*) AS count FROM sources").get() as { count: number }).count;
     const releases = this.db.prepare("SELECT DISTINCT release FROM sources ORDER BY release").pluck().all() as string[];
     return { documents, chunks, releases };
   }
@@ -367,7 +368,7 @@ export class DocumentationSearchDatabase {
   }
 
   manifest(): IndexManifest | null {
-    const value = this.db.prepare("SELECT value FROM settings WHERE key = 'manifest'").pluck().get() as string | undefined;
+    const value = (this.db.prepare("SELECT value FROM settings WHERE key = 'manifest'").get() as { value: string } | undefined)?.value;
     return value ? JSON.parse(value) as IndexManifest : null;
   }
 }

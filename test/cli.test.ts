@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chunkDocument } from "../src/chunker.js";
 import { DocumentationSearchDatabase } from "../src/database.js";
 import { HashEmbeddingProvider } from "../src/embedder.js";
+import { removeDirectory } from "./helpers.js";
 
 let dataDirectory: string;
 
@@ -27,7 +28,7 @@ beforeAll(async () => {
   database.close();
 }, 60_000);
 
-afterAll(() => fs.rmSync(dataDirectory, { recursive: true, force: true }));
+afterAll(() => removeDirectory(dataDirectory));
 
 describe("nowdev-ai-toolbox-documentationsearch CLI", () => {
   it.each([

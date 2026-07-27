@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { HashEmbeddingProvider, type EmbeddingBatch } from "../src/embedder.js";
 import { GitHubDocumentationSource, type DocumentationArea, type SourceEntry, type SourceTree } from "../src/github.js";
 import { DocumentationSearch } from "../src/service-context.js";
+import { removeDirectory } from "./helpers.js";
 
 class FakeSource extends GitHubDocumentationSource {
   downloads = 0;
@@ -90,7 +91,9 @@ class StreamingEmbeddingProvider extends HashEmbeddingProvider {
 }
 
 const temporaryDirectories: string[] = [];
-afterEach(() => temporaryDirectories.splice(0).forEach((directory) => fs.rmSync(directory, { recursive: true, force: true })));
+afterEach(async () => {
+  for (const directory of temporaryDirectories.splice(0)) await removeDirectory(directory);
+});
 
 describe("ServiceContext", () => {
   it("uses MiniLM for a new index when no profile is selected", () => {

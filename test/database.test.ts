@@ -5,9 +5,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { chunkDocument } from "../src/chunker.js";
 import { DocumentationSearchDatabase } from "../src/database.js";
 import { HashEmbeddingProvider } from "../src/embedder.js";
+import { removeDirectory } from "./helpers.js";
 
 const temporaryDirectories: string[] = [];
-afterEach(() => temporaryDirectories.splice(0).forEach((directory) => fs.rmSync(directory, { recursive: true, force: true })));
+afterEach(async () => {
+  for (const directory of temporaryDirectories.splice(0)) await removeDirectory(directory);
+});
 
 describe("DocumentationSearchDatabase", () => {
   it("stores and searches chunks with hybrid ranking", async () => {

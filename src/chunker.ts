@@ -66,6 +66,7 @@ export function parseFrontmatter(markdown: string): [Frontmatter, string] {
 
 function normalizeMarkdown(markdown: string): string {
   return markdown
+    .replaceAll("\r\n", "\n")
     .replaceAll("\\(", "(")
     .replaceAll("\\)", ")")
     .replace(/<\/table>(?=\|)/g, "</table>\n")

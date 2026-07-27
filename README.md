@@ -8,7 +8,7 @@
 - Internet access during initial documentation and model download
 - Approximately 500 MB to 1 GB of free cache space for a full family
 
-On supported Windows x64 and Node.js versions, npm downloads the prebuilt SQLite native binary automatically. Visual Studio C++ Build Tools and Python are only needed when a compatible binary is unavailable or cannot be downloaded.
+The local SQLite engine (libsql) ships prebuilt native binaries for macOS, Windows x64, and Linux (both glibc and musl, x64/arm64/arm), so npm installs it without needing a C++ compiler or Python on any of those platforms. Windows on ARM64 is the one common exception without a prebuilt binary.
 
 ## Install
 
