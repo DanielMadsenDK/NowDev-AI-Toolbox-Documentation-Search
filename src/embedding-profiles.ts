@@ -17,6 +17,7 @@ export const EMBEDDING_PROFILES = {
     documentPrefix: "",
     queryPrefix: "Represent this sentence for searching relevant passages: ",
     maxEmbeddingCharacters: 2048,
+    minDimensions: undefined,
   },
   "nomic-embed-text-v1.5": {
     model: "nomic-ai/nomic-embed-text-v1.5",
@@ -36,6 +37,7 @@ export const EMBEDDING_PROFILES = {
     documentPrefix: "search_document: ",
     queryPrefix: "search_query: ",
     maxEmbeddingCharacters: 2048,
+    minDimensions: undefined,
   },
   "multilingual-e5-small": {
     model: "Xenova/multilingual-e5-small",
@@ -45,6 +47,7 @@ export const EMBEDDING_PROFILES = {
     documentPrefix: "passage: ",
     queryPrefix: "query: ",
     maxEmbeddingCharacters: 2048,
+    minDimensions: undefined,
   },
   "all-minilm-l6-v2": {
     model: "Xenova/all-MiniLM-L6-v2",
@@ -54,6 +57,7 @@ export const EMBEDDING_PROFILES = {
     documentPrefix: "",
     queryPrefix: "",
     maxEmbeddingCharacters: 1024,
+    minDimensions: undefined,
   },
 } as const satisfies Record<string, EmbeddingProfile>;
 
