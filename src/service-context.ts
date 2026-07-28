@@ -2,13 +2,14 @@ import { chunkDocument, contentHash } from "./chunker.js";
 import { DEFAULT_FAMILY, DEFAULT_MAX_EMBEDDING_CHARACTERS, resolvePaths, SEARCH_SCHEMA_VERSION, type DocumentationSearchPaths } from "./config.js";
 import { DocumentationSearchDatabase, readStoredDimensions, readStoredEmbeddingProfile } from "./database.js";
 import { DEFAULT_EMBEDDING_PROFILE, embeddingProfile, isEmbeddingProfileName, type EmbeddingProfileName } from "./embedding-profiles.js";
-import { TransformersEmbeddingProvider, type EmbeddingBatch, type EmbeddingDevice, type EmbeddingProvider } from "./embedder.js";
+import { TransformersEmbeddingProvider, type EmbeddingBatch, type EmbeddingDevice, type EmbeddingProvider, type TransformersEmbeddingOptions } from "./embedder.js";
 import { GitHubDocumentationSource, type DocumentationArea, type SourceEntry } from "./github.js";
 import type { DocumentChunk, IndexFailure, IndexManifest, SearchOptions, SearchResult, UpdateResult } from "./types.js";
 
 export interface DocumentationSearchOptions {
   dataDirectory?: string;
   embeddingDevice?: EmbeddingDevice;
+  embeddingDtype?: TransformersEmbeddingOptions["dtype"];
   embeddingBatchSize?: number;
   embeddingMaxCharacters?: number;
   embeddingThreads?: number;
@@ -87,6 +88,7 @@ interface EmbeddingState {
 }
 
 type ParseResult = { parsed: ParsedSource; failure?: never } | { parsed?: never; failure: IndexFailure };
+type ParseBatchOutcome = { ok: true; results: ParseResult[] } | { ok: false; error: unknown };
 
 function failureMessage(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
@@ -126,6 +128,7 @@ export class DocumentationSearch {
       ...profile,
       cacheDirectory: this.paths.models,
       device: options.embeddingDevice,
+      dtype: options.embeddingDtype,
       batchSize: options.embeddingBatchSize,
       ...(options.embeddingMaxCharacters === undefined ? {} : { maxEmbeddingCharacters: options.embeddingMaxCharacters }),
       threads: options.embeddingThreads,
@@ -155,9 +158,10 @@ export class DocumentationSearch {
       || (manifest.documentPrefix ?? "") !== (this.embeddings.documentPrefix ?? "")
       || (manifest.queryPrefix ?? "") !== (this.embeddings.queryPrefix ?? "")
       || (manifest.maxEmbeddingCharacters ?? Number.POSITIVE_INFINITY) !== (this.embeddings.maxEmbeddingCharacters ?? Number.POSITIVE_INFINITY)
+      || (manifest.dtype ?? "") !== (this.embeddings.dtype ?? "")
     )) {
       this.database.close();
-      throw new Error(`Index was built with ${manifest.embeddingProvider}/${manifest.embeddingModel} (${manifest.dimensions} dimensions, ${manifest.pooling} pooling), but the active provider is ${this.embeddings.name}/${this.embeddings.model} (${this.embeddings.dimensions} dimensions, ${this.embeddings.pooling ?? "mean"} pooling). Use a separate data directory or run nowdev-ai-toolbox-documentationsearch reset-index --yes before rebuilding.`);
+      throw new Error(`Index was built with ${manifest.embeddingProvider}/${manifest.embeddingModel} (${manifest.dimensions} dimensions, ${manifest.pooling} pooling, ${manifest.dtype ?? "default"} dtype), but the active provider is ${this.embeddings.name}/${this.embeddings.model} (${this.embeddings.dimensions} dimensions, ${this.embeddings.pooling ?? "mean"} pooling, ${this.embeddings.dtype ?? "default"} dtype). Use a separate data directory or run nowdev-ai-toolbox-documentationsearch reset-index --yes before rebuilding.`);
     }
   }
 
@@ -211,6 +215,13 @@ export class DocumentationSearch {
       const sourceContent = chunks.find((chunk) => typeof chunk.metadata.full_content === "string")?.metadata.full_content;
       return { parsed: { path: entry.path, blobSha: entry.blobSha, contentHash: contentHash(markdown), content: typeof sourceContent === "string" ? sourceContent : markdown, chunks } };
     });
+    // Settles (never rejects) so the next batch can be parsed in the background, concurrently with the current
+    // batch's embedding, without an unawaited rejection tripping Node's unhandled-rejection handling before the
+    // loop gets back around to consuming it.
+    const startParseBatch = (sourceEntries: SourceEntry[]): Promise<ParseBatchOutcome> => parseEntries(sourceEntries).then(
+      (results): ParseBatchOutcome => ({ ok: true, results }),
+      (error): ParseBatchOutcome => ({ ok: false, error }),
+    );
     const failures: IndexFailure[] = [];
     const prepared: Array<{ path: string; chunkCount: number }> = [];
     const committedPaths = new Set<string>();
@@ -310,10 +321,17 @@ export class DocumentationSearch {
         reportOverallProgress();
       }
     };
+    // One batch of parsing runs ahead of the batch currently being embedded: parsing (network-bound) and embedding
+    // (CPU-bound) use disjoint resources, so overlapping them hides one phase's latency behind the other's instead
+    // of paying for both in sequence. Only ever one batch ahead, so memory stays bounded for large corpora.
+    let nextBatch = changed.length ? startParseBatch(changed.slice(0, PREPARATION_SOURCE_BATCH_SIZE)) : undefined;
     for (let offset = 0; offset < changed.length; offset += PREPARATION_SOURCE_BATCH_SIZE) {
-      const parseResults = await parseEntries(changed.slice(offset, offset + PREPARATION_SOURCE_BATCH_SIZE));
-      const parsed = parseResults.flatMap((result) => result.parsed ? [result.parsed] : []);
-      failures.push(...parseResults.flatMap((result) => result.failure ? [result.failure] : []));
+      const outcome = await nextBatch!;
+      if (!outcome.ok) throw outcome.error;
+      const nextOffset = offset + PREPARATION_SOURCE_BATCH_SIZE;
+      nextBatch = nextOffset < changed.length ? startParseBatch(changed.slice(nextOffset, nextOffset + PREPARATION_SOURCE_BATCH_SIZE)) : undefined;
+      const parsed = outcome.results.flatMap((result) => result.parsed ? [result.parsed] : []);
+      failures.push(...outcome.results.flatMap((result) => result.failure ? [result.failure] : []));
       if (parsed.some((source) => source.chunks.length)) progress(`Embedding prepared chunks through ${processed}/${changed.length} sources...`);
       for (const group of groupSources(parsed, EMBEDDING_GROUP_CHUNK_TARGET)) await embedGroup(group);
     }
@@ -333,6 +351,7 @@ export class DocumentationSearch {
       embeddingModel: this.embeddings.model,
       dimensions: this.embeddings.dimensions,
       pooling: this.embeddings.pooling ?? "mean",
+      dtype: this.embeddings.dtype,
       layerNorm: this.embeddings.layerNorm,
       normalized: true,
       documentPrefix: this.embeddings.documentPrefix,
@@ -397,6 +416,7 @@ export class DocumentationSearch {
         dimensions: this.embeddings.dimensions,
         device: this.embeddings.activeDevice ?? this.embeddings.device ?? "unknown",
         pooling: this.embeddings.pooling ?? "mean",
+        dtype: this.embeddings.dtype,
       },
       dataDirectory: this.paths.root,
     };

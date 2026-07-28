@@ -9,6 +9,7 @@ export interface EmbeddingProvider {
   readonly model: string;
   readonly dimensions: number;
   readonly device?: EmbeddingDevice;
+  readonly dtype?: string;
   readonly pooling?: "mean" | "cls";
   readonly layerNorm?: boolean;
   readonly documentPrefix?: string;
@@ -94,6 +95,7 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
   readonly model: string;
   readonly dimensions: number;
   readonly device: EmbeddingDevice;
+  readonly dtype: NonNullable<TransformersEmbeddingOptions["dtype"]>;
   readonly pooling: "mean" | "cls";
   readonly layerNorm: boolean;
   readonly documentPrefix: string;
@@ -116,6 +118,7 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
     this.model = options.model ?? DEFAULT_MODEL;
     this.dimensions = options.dimensions ?? DEFAULT_DIMENSIONS;
     this.device = options.device ?? DEFAULT_DEVICE;
+    this.dtype = options.dtype ?? "q8";
     this.pooling = options.pooling ?? DEFAULT_POOLING;
     this.layerNorm = options.layerNorm ?? this.model === "nomic-ai/nomic-embed-text-v1.5";
     this.documentPrefix = options.documentPrefix ?? DEFAULT_DOCUMENT_PREFIX;
@@ -140,7 +143,7 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
       this.layerNormOperation = transformers.layer_norm;
       // onnxruntime-node's default intra-op thread count isn't always the full logical core count; on a low-core machine that leaves real CPU throughput on the table for a compute-bound embedding pass. Configurable (this.threads) since host core counts vary.
       const sessionOptions = this.runtimeDevice === "cpu" ? { intraOpNumThreads: this.threads } : undefined;
-      return transformers.pipeline("feature-extraction", this.model, { device: this.runtimeDevice, dtype: this.options.dtype ?? "q8", session_options: sessionOptions });
+      return transformers.pipeline("feature-extraction", this.model, { device: this.runtimeDevice, dtype: this.dtype, session_options: sessionOptions });
     });
     return this.pipeline;
   }

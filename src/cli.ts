@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_EMBEDDING_CHARACTERS, PACKAGE_VERSION } from "./config.js";
 import { resolvePaths } from "./config.js";
-import { HashEmbeddingProvider, type EmbeddingDevice } from "./embedder.js";
+import { HashEmbeddingProvider, type EmbeddingDevice, type TransformersEmbeddingOptions } from "./embedder.js";
 import { DEFAULT_EMBEDDING_PROFILE, EMBEDDING_PROFILES, type EmbeddingProfileName } from "./embedding-profiles.js";
 import { DocumentationSearch } from "./service-context.js";
 import type { ChunkType, DocType } from "./types.js";
@@ -15,6 +15,7 @@ interface GlobalOptions {
 	json?: boolean;
 	deterministicEmbeddings?: boolean;
 	device?: EmbeddingDevice;
+	embeddingDtype?: TransformersEmbeddingOptions["dtype"];
 	embeddingBatchSize?: number;
 	embeddingMaxCharacters?: number;
 	embeddingThreads?: number;
@@ -48,6 +49,7 @@ function createContext(command: Command): DocumentationSearch {
 	return new DocumentationSearch({
 		dataDirectory: options.dataDir,
 		embeddingDevice: options.device,
+		embeddingDtype: options.embeddingDtype,
 		embeddingBatchSize: options.embeddingBatchSize,
 		embeddingMaxCharacters: options.embeddingMaxCharacters,
 		embeddingThreads: options.embeddingThreads,
@@ -92,6 +94,7 @@ const program = new Command()
 	.addOption(new Option("--embedding-profile <profile>", `curated ONNX embedding profile (new-index default: ${DEFAULT_EMBEDDING_PROFILE})`).choices(Object.keys(EMBEDDING_PROFILES)))
 	.option("--embedding-dimensions <count>", "truncate to this many embedding dimensions (only supported by Matryoshka-capable profiles, e.g. nomic-embed-text-v1.5)", integerOption("embedding-dimensions", 1, 4096))
 	.addOption(new Option("--device <device>", "embedding execution device").choices(["cpu", "dml", "webgpu"]).default("cpu"))
+	.addOption(new Option("--embedding-dtype <dtype>", "ONNX quantization for the embedding model (default: q8)").choices(["auto", "fp32", "fp16", "q8", "q4", "q4f16"]))
 	.option("--embedding-batch-size <count>", "texts per embedding inference batch (default: 32 CPU, 8 DirectML)", integerOption("embedding-batch-size", 1, 1024))
 	.option(`--embedding-max-characters <count>`, `override the profile-specific passage cap (MiniLM: 1024; other built-in profiles: ${DEFAULT_MAX_EMBEDDING_CHARACTERS})`, integerOption("embedding-max-characters", 256, 1_000_000))
 	.option("--embedding-threads <count>", "ONNX Runtime intra-op thread count for CPU inference (default: the host's logical core count)", integerOption("embedding-threads", 1, 1024))

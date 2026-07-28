@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { SEARCH_SCHEMA_VERSION } from "../src/config.js";
 import { HashEmbeddingProvider, type EmbeddingBatch } from "../src/embedder.js";
 import { GitHubDocumentationSource, type DocumentationArea, type SourceEntry, type SourceTree } from "../src/github.js";
 import { DocumentationSearch } from "../src/service-context.js";
@@ -58,7 +59,9 @@ class TwoDocumentSource extends GitHubDocumentationSource {
 }
 
 class ManyDocumentSource extends GitHubDocumentationSource {
-  readonly total = 129;
+  // Spans three preparation batches (128 + 128 + 1) so the test can distinguish "batch 2 was
+  // prefetched while batch 1 embedded" from "everything was parsed up front".
+  readonly total = 2 * 128 + 1;
   downloads = 0;
 
   override async discover(): Promise<SourceTree> {
@@ -72,6 +75,10 @@ class ManyDocumentSource extends GitHubDocumentationSource {
     this.downloads += 1;
     return `---\ntitle: ${entry.path}\n---\n# ${entry.path}\nContent.`;
   }
+}
+
+class DtypeEmbeddingProvider extends HashEmbeddingProvider {
+  constructor(readonly dtype: string) { super(32); }
 }
 
 class StreamingEmbeddingProvider extends HashEmbeddingProvider {
@@ -148,6 +155,31 @@ describe("ServiceContext", () => {
     expect(() => new DocumentationSearch({ dataDirectory: directory, embeddingProfile: "nomic-embed-text-v1.5", embeddingDimensions: 32 })).toThrow("--embedding-dimensions must be between 64 and 768");
   });
 
+  it("rejects reopening an index with a different embedding dtype", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-dtype-mismatch-"));
+    temporaryDirectories.push(directory);
+    const built = new DocumentationSearch({ dataDirectory: directory, embeddingProvider: new DtypeEmbeddingProvider("q8") });
+    built.database.setManifest({
+      schemaVersion: SEARCH_SCHEMA_VERSION,
+      family: "australia",
+      branch: "australia",
+      embeddingProvider: built.embeddings.name,
+      embeddingModel: built.embeddings.model,
+      dimensions: built.embeddings.dimensions,
+      pooling: built.embeddings.pooling ?? "mean",
+      dtype: built.embeddings.dtype,
+      layerNorm: built.embeddings.layerNorm,
+      normalized: true,
+      documentPrefix: built.embeddings.documentPrefix,
+      queryPrefix: built.embeddings.queryPrefix,
+      maxEmbeddingCharacters: built.embeddings.maxEmbeddingCharacters,
+      updatedAt: new Date().toISOString(),
+    });
+    built.close();
+
+    expect(() => new DocumentationSearch({ dataDirectory: directory, embeddingProvider: new DtypeEmbeddingProvider("q4") })).toThrow(/dtype/);
+  });
+
   it("indexes changed sources and skips unchanged sources", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-e2e-"));
     temporaryDirectories.push(directory);
@@ -194,7 +226,7 @@ describe("ServiceContext", () => {
     context.close();
   });
 
-  it("starts embedding before every changed source is prepared", async () => {
+  it("prefetches only the next batch while embedding the current one", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-streaming-"));
     temporaryDirectories.push(directory);
     const source = new ManyDocumentSource();
@@ -206,8 +238,11 @@ describe("ServiceContext", () => {
     };
 
     const result = await context.update({ family: "australia", concurrency: 8 });
-    expect(downloadsAtFirstEmbedding).toEqual([128]);
-    expect(result).toMatchObject({ added: 129, chunks: 129, failures: [] });
+    // Batch 1 (128 docs) must be fully parsed before its own embedding starts, and batch 2 (128 docs)
+    // may already be prefetched in the background by then -- but batch 3 (the last document) must not be.
+    expect(downloadsAtFirstEmbedding[0]).toBeGreaterThanOrEqual(128);
+    expect(downloadsAtFirstEmbedding[0]).toBeLessThan(source.total);
+    expect(result).toMatchObject({ added: source.total, chunks: source.total, failures: [] });
     context.close();
   });
 });
