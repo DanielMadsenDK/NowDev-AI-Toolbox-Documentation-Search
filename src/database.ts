@@ -21,6 +21,19 @@ export function readStoredEmbeddingProfile(filename: string): string | null {
   }
 }
 
+export function readStoredDimensions(filename: string): number | null {
+  if (!fs.existsSync(filename)) return null;
+  const database = new DatabaseSync(filename, { readOnly: true });
+  try {
+    const hasSettings = scalar<number>(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings'").get());
+    if (!hasSettings) return null;
+    const value = scalar<string>(database.prepare("SELECT value FROM settings WHERE key = 'dimensions'").get());
+    return value ? Number(value) : null;
+  } finally {
+    database.close();
+  }
+}
+
 interface SearchRow {
   id: number;
   doc_type: DocumentChunk["docType"];

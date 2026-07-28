@@ -124,6 +124,30 @@ describe("ServiceContext", () => {
     expect(() => new DocumentationSearch({ dataDirectory: directory, embeddingProfile: "nomic-embed-text-v1.5" })).toThrow("Index uses embedding profile nomic-embed-text-v1");
   });
 
+  it("truncates a Matryoshka-capable profile to a custom dimension count and persists it across reopen", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-dimensions-"));
+    temporaryDirectories.push(directory);
+    const selected = new DocumentationSearch({ dataDirectory: directory, embeddingProfile: "nomic-embed-text-v1.5", embeddingDimensions: 256 });
+    expect(selected.status().embedding).toMatchObject({ profile: "nomic-embed-text-v1.5", dimensions: 256 });
+    selected.close();
+
+    const reopened = new DocumentationSearch({ dataDirectory: directory });
+    expect(reopened.status().embedding).toMatchObject({ profile: "nomic-embed-text-v1.5", dimensions: 256 });
+    reopened.close();
+  });
+
+  it("rejects custom dimensions for a profile that doesn't support them", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-dimensions-unsupported-"));
+    temporaryDirectories.push(directory);
+    expect(() => new DocumentationSearch({ dataDirectory: directory, embeddingProfile: "all-minilm-l6-v2", embeddingDimensions: 200 })).toThrow("does not support custom dimensions");
+  });
+
+  it("rejects a custom dimension count below the profile's minimum", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-dimensions-too-small-"));
+    temporaryDirectories.push(directory);
+    expect(() => new DocumentationSearch({ dataDirectory: directory, embeddingProfile: "nomic-embed-text-v1.5", embeddingDimensions: 32 })).toThrow("--embedding-dimensions must be between 64 and 768");
+  });
+
   it("indexes changed sources and skips unchanged sources", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-e2e-"));
     temporaryDirectories.push(directory);

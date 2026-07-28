@@ -19,6 +19,7 @@ interface GlobalOptions {
 	embeddingMaxCharacters?: number;
 	embeddingThreads?: number;
 	embeddingProfile?: EmbeddingProfileName;
+	embeddingDimensions?: number;
 }
 
 function integerOption(name: string, minimum: number, maximum: number) {
@@ -51,6 +52,7 @@ function createContext(command: Command): DocumentationSearch {
 		embeddingMaxCharacters: options.embeddingMaxCharacters,
 		embeddingThreads: options.embeddingThreads,
 		embeddingProfile: options.embeddingProfile,
+		embeddingDimensions: options.embeddingDimensions,
 		embeddingProvider: options.deterministicEmbeddings ? new HashEmbeddingProvider() : undefined,
 	});
 }
@@ -88,6 +90,7 @@ const program = new Command()
 	.option("--json", "emit JSON")
 	.option("--deterministic-embeddings", "use lightweight hash embeddings for testing")
 	.addOption(new Option("--embedding-profile <profile>", `curated ONNX embedding profile (new-index default: ${DEFAULT_EMBEDDING_PROFILE})`).choices(Object.keys(EMBEDDING_PROFILES)))
+	.option("--embedding-dimensions <count>", "truncate to this many embedding dimensions (only supported by Matryoshka-capable profiles, e.g. nomic-embed-text-v1.5)", integerOption("embedding-dimensions", 1, 4096))
 	.addOption(new Option("--device <device>", "embedding execution device").choices(["cpu", "dml", "webgpu"]).default("cpu"))
 	.option("--embedding-batch-size <count>", "texts per embedding inference batch (default: 32 CPU, 8 DirectML)", integerOption("embedding-batch-size", 1, 1024))
 	.option(`--embedding-max-characters <count>`, `override the profile-specific passage cap (MiniLM: 1024; other built-in profiles: ${DEFAULT_MAX_EMBEDDING_CHARACTERS})`, integerOption("embedding-max-characters", 256, 1_000_000))

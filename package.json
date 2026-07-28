@@ -1,6 +1,6 @@
 {
   "name": "@danielmadsendk/nowdev-ai-toolbox-documentationsearch",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "DocumentationSearch: local-first ServiceNow documentation indexing and semantic search",
   "type": "module",
   "license": "MIT",

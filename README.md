@@ -44,6 +44,14 @@ node dist/cli.js --embedding-profile multilingual-e5-small --data-dir ~/.cache/d
 
 Supported profiles are `bge-base-en-v1.5`, `nomic-embed-text-v1.5`, `nomic-embed-text-v1`, `multilingual-e5-small`, and `all-minilm-l6-v2`. The profile fixes the model, vector dimensions, pooling, normalization preparation, and retrieval prefixes as required by its model card. Use a separate data directory for each profile. The selected profile is written to the index immediately so interrupted indexing cannot later resume with a different model.
 
+`nomic-embed-text-v1.5` was trained with Matryoshka Representation Learning, so its 768-dimensional vectors can be truncated to a smaller width without a separate model. Pass `--embedding-dimensions <count>` (64-768) alongside that profile to build a smaller, cheaper-to-store index:
+
+```bash
+node dist/cli.js --embedding-profile nomic-embed-text-v1.5 --embedding-dimensions 256 --data-dir ~/.cache/documentationsearch-nomic-256 init --family australia
+```
+
+Like the profile choice, the effective dimension count is written to the index immediately, so later `update`/`search` calls against the same data directory don't need to repeat the flag. Profiles without Matryoshka training reject `--embedding-dimensions`.
+
 Source preparation is streamed in bounded windows: documents are downloaded and chunked, embedded in length-sorted shared batches, committed, and released before the next window is prepared. This keeps full-corpus indexing from retaining every parsed document in memory while preserving full detail embeddings.
 
 Embedding runs on the native ONNX Runtime CPU provider by default. On Windows, DirectML is the most practical GPU option when your graphics driver supports it. DirectML defaults to a smaller batch and a token budget because transformer memory grows with both batch size and passage length; the provider automatically halves a batch after a native out-of-memory error:

@@ -59,6 +59,14 @@ describe("createEmbeddingBatches", () => {
     expect(EMBEDDING_PROFILES["all-minilm-l6-v2"]).toMatchObject({ dimensions: 384, pooling: "mean", documentPrefix: "", queryPrefix: "", maxEmbeddingCharacters: 1024 });
   });
 
+  it("only marks the Matryoshka-trained profile as supporting custom dimensions", () => {
+    expect(EMBEDDING_PROFILES["nomic-embed-text-v1.5"].minDimensions).toBe(64);
+    expect(EMBEDDING_PROFILES["bge-base-en-v1.5"].minDimensions).toBeUndefined();
+    expect(EMBEDDING_PROFILES["nomic-embed-text-v1"].minDimensions).toBeUndefined();
+    expect(EMBEDDING_PROFILES["multilingual-e5-small"].minDimensions).toBeUndefined();
+    expect(EMBEDDING_PROFILES["all-minilm-l6-v2"].minDimensions).toBeUndefined();
+  });
+
   it("caps only the text representation sent to the embedding model", () => {
     const text = "prefix\n" + "x".repeat(20);
     expect(truncateEmbeddingText(text, 12)).toBe("prefix\nxxxxx");

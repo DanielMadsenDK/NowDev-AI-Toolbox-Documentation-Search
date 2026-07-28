@@ -2,6 +2,12 @@ import type { TransformersEmbeddingOptions } from "./embedder.js";
 
 export const DEFAULT_EMBEDDING_PROFILE = "all-minilm-l6-v2";
 
+export interface EmbeddingProfile extends Pick<TransformersEmbeddingOptions, "model" | "pooling" | "layerNorm" | "documentPrefix" | "queryPrefix" | "maxEmbeddingCharacters"> {
+  dimensions: number;
+  /** Lowest dimension count this Matryoshka-trained model can be truncated to via --embedding-dimensions. Omitted means the profile has a fixed dimension count and cannot be overridden. */
+  minDimensions?: number;
+}
+
 export const EMBEDDING_PROFILES = {
   "bge-base-en-v1.5": {
     model: "Xenova/bge-base-en-v1.5",
@@ -20,6 +26,7 @@ export const EMBEDDING_PROFILES = {
     documentPrefix: "search_document: ",
     queryPrefix: "search_query: ",
     maxEmbeddingCharacters: 2048,
+    minDimensions: 64,
   },
   "nomic-embed-text-v1": {
     model: "nomic-ai/nomic-embed-text-v1",
@@ -48,11 +55,11 @@ export const EMBEDDING_PROFILES = {
     queryPrefix: "",
     maxEmbeddingCharacters: 1024,
   },
-} as const satisfies Record<string, Pick<TransformersEmbeddingOptions, "model" | "dimensions" | "pooling" | "layerNorm" | "documentPrefix" | "queryPrefix" | "maxEmbeddingCharacters">>;
+} as const satisfies Record<string, EmbeddingProfile>;
 
 export type EmbeddingProfileName = keyof typeof EMBEDDING_PROFILES;
 
-export function embeddingProfile(name: EmbeddingProfileName) {
+export function embeddingProfile(name: EmbeddingProfileName): EmbeddingProfile {
   return EMBEDDING_PROFILES[name];
 }
 

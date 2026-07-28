@@ -35,6 +35,7 @@ describe("nowdev-ai-toolbox-documentationsearch CLI", () => {
     ["search limit", ["search", "GlideQuery", "--limit", "nope"], "limit must be an integer"],
     ["search threshold", ["search", "GlideQuery", "--threshold", "nope"], "threshold must be a finite number"],
     ["embedding profile", ["--embedding-profile", "unsupported", "status"], "Allowed choices"],
+    ["embedding dimensions", ["--embedding-dimensions", "nope", "status"], "must be an integer"],
     ["update concurrency", ["update", "--concurrency", "nope"], "concurrency must be an integer"],
     ["update limit", ["update", "--limit", "0"], "limit must be between 1 and 1000000"],
   ])("rejects malformed %s values as JSON", (_name, commandArguments, expected) => {

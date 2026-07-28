@@ -1,6 +1,6 @@
 import { chunkDocument, contentHash } from "./chunker.js";
 import { DEFAULT_FAMILY, DEFAULT_MAX_EMBEDDING_CHARACTERS, resolvePaths, SEARCH_SCHEMA_VERSION, type DocumentationSearchPaths } from "./config.js";
-import { DocumentationSearchDatabase, readStoredEmbeddingProfile } from "./database.js";
+import { DocumentationSearchDatabase, readStoredDimensions, readStoredEmbeddingProfile } from "./database.js";
 import { DEFAULT_EMBEDDING_PROFILE, embeddingProfile, isEmbeddingProfileName, type EmbeddingProfileName } from "./embedding-profiles.js";
 import { TransformersEmbeddingProvider, type EmbeddingBatch, type EmbeddingDevice, type EmbeddingProvider } from "./embedder.js";
 import { GitHubDocumentationSource, type DocumentationArea, type SourceEntry } from "./github.js";
@@ -13,6 +13,7 @@ export interface DocumentationSearchOptions {
   embeddingMaxCharacters?: number;
   embeddingThreads?: number;
   embeddingProfile?: EmbeddingProfileName;
+  embeddingDimensions?: number;
   embeddingProvider?: EmbeddingProvider;
   source?: GitHubDocumentationSource;
 }
@@ -109,13 +110,26 @@ export class DocumentationSearch {
     const storedProfile: EmbeddingProfileName | null = storedValue && isEmbeddingProfileName(storedValue) ? storedValue : null;
     const selectedProfile = options.embeddingProfile ?? storedProfile ?? DEFAULT_EMBEDDING_PROFILE;
     this.embeddingProfileName = options.embeddingProvider ? null : selectedProfile;
+    const profile = embeddingProfile(selectedProfile);
+    const storedDimensions = options.embeddingProvider ? null : readStoredDimensions(this.paths.database);
+    // A stored dimension count only applies to the profile that wrote it; reopening under a different (or unknown) profile must not silently reuse it.
+    const selectedDimensions = options.embeddingDimensions ?? (storedProfile === selectedProfile ? storedDimensions : null) ?? profile.dimensions;
+    if (!options.embeddingProvider && selectedDimensions !== profile.dimensions) {
+      if (profile.minDimensions === undefined) {
+        throw new Error(`Embedding profile ${selectedProfile} does not support custom dimensions (fixed at ${profile.dimensions}). Omit --embedding-dimensions or choose a profile that supports it.`);
+      }
+      if (selectedDimensions < profile.minDimensions || selectedDimensions > profile.dimensions) {
+        throw new Error(`--embedding-dimensions must be between ${profile.minDimensions} and ${profile.dimensions} for ${selectedProfile}.`);
+      }
+    }
     this.embeddings = options.embeddingProvider ?? new TransformersEmbeddingProvider({
-      ...embeddingProfile(selectedProfile),
+      ...profile,
       cacheDirectory: this.paths.models,
       device: options.embeddingDevice,
       batchSize: options.embeddingBatchSize,
       ...(options.embeddingMaxCharacters === undefined ? {} : { maxEmbeddingCharacters: options.embeddingMaxCharacters }),
       threads: options.embeddingThreads,
+      dimensions: selectedDimensions,
     });
     this.source = options.source ?? new GitHubDocumentationSource({ repositoryDirectory: this.paths.repository });
     this.database = new DocumentationSearchDatabase(this.paths.database, this.embeddings.dimensions);
