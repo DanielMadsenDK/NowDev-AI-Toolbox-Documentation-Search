@@ -11,7 +11,7 @@ import { removeDirectory } from "./helpers.js";
 let dataDirectory: string;
 
 function runCli(args: string[]) {
-  return spawnSync(process.execPath, [path.resolve("dist/cli.js"), ...args], { encoding: "utf8" });
+  return spawnSync(process.execPath, [path.resolve("dist/cli-entry.js"), ...args], { encoding: "utf8" });
 }
 
 beforeAll(async () => {

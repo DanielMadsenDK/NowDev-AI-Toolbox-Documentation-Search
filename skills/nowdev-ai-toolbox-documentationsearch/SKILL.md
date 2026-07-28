@@ -103,7 +103,7 @@ Embedding uses the native ONNX Runtime CPU provider by default. On Windows, `--d
 
 Search combines vector nearest-neighbor retrieval with FTS5 keyword retrieval. FTS5 weights titles and headings more heavily, recognizes multi-word phrases, and API object/method identifiers receive an exact-match boost. The vector index is partitioned by release, so a `--family`-filtered search only scans that release's shard instead of ranking the whole index and filtering afterward. Results default to at most three chunks per source document; use `--max-per-source` to change that. Use `--deduplicate-releases` when searching across releases and only one release of each source chunk is needed.
 
-The current search schema stores API object and method names as dedicated FTS5 fields and partitions the vector index by release. If the tool reports an older search schema, run `nowdev-ai-toolbox-documentationsearch reset-index --yes` and re-index the requested release.
+The current search schema stores source text once per document, uses an external-content FTS5 index, stores API object and method names as dedicated search fields, and partitions the exact sqlite-vec index by release. If the tool reports an older search schema, run `nowdev-ai-toolbox-documentationsearch reset-index --yes` and re-index the requested release.
 
 Valid areas are `all-docs`, `scripting`, `server`, `client`, and `scripts`. The option is `--family`, not `--famly`.
 

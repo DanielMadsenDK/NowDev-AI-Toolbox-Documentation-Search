@@ -14,7 +14,7 @@ export const DEFAULT_DEVICE = "cpu";
 export const DEFAULT_DOCUMENT_PREFIX = "";
 export const DEFAULT_QUERY_PREFIX = "Represent this sentence for searching relevant passages: ";
 export const DEFAULT_MAX_EMBEDDING_CHARACTERS = 2048;
-export const SEARCH_SCHEMA_VERSION = 5;
+export const SEARCH_SCHEMA_VERSION = 6;
 
 export interface DocumentationSearchPaths {
   root: string;

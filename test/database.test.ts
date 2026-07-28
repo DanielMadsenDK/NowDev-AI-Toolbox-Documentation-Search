@@ -30,6 +30,9 @@ describe("DocumentationSearchDatabase", () => {
     const semanticOnly = database.search("keyword-that-does-not-exist", exactVector!, {}, 1, 0.99);
     expect(semanticOnly[0]?.similarity).toBeCloseTo(1, 5);
     expect(database.stats()).toEqual({ documents: 1, chunks: 2, releases: ["australia"] });
+    expect(database.getSourceContent("markdown/itsm/incidents.md", "australia")).toContain("Resolve service interruptions");
+    const storedMetadata = database.db.prepare("SELECT metadata FROM documents ORDER BY id").all() as Array<{ metadata: string }>;
+    expect(storedMetadata.every((row) => !row.metadata.includes("full_content") && !row.metadata.includes("section_content"))).toBe(true);
     database.close();
   });
 
@@ -107,6 +110,26 @@ describe("DocumentationSearchDatabase", () => {
     const results = database.search("absent-keyword", Float32Array.from([1, 0]), { release: "australia", chunkType: "parameter" }, 1, -1);
     expect(results[0]?.sourcePath).toBe(target!.sourcePath);
     expect(results[0]?.chunkType).toBe("parameter");
+    database.close();
+  });
+
+  it("supports every metadata prefilter combination", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-filter-combinations-"));
+    temporaryDirectories.push(directory);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 2);
+    const [chunk] = chunkDocument("markdown/guides/task.md", "---\ntitle: Task guide\ntopic_type: task\n---\n# Task guide\nPerform a task.", "australia", "australia");
+    database.replaceSources("australia", [{ path: chunk!.sourcePath, blobSha: "task", contentHash: chunk!.contentHash, chunks: [chunk!], embeddings: [Float32Array.from([1, 0])] }], []);
+    const entries = [
+      ["docType", chunk!.docType],
+      ["publication", chunk!.publication],
+      ["chunkType", chunk!.chunkType],
+      ["topicType", chunk!.topicType!],
+    ] as const;
+
+    for (let mask = 0; mask < 16; mask += 1) {
+      const filters = Object.fromEntries(entries.filter((_, index) => mask & (1 << index)));
+      expect(database.search("absent-keyword", Float32Array.from([1, 0]), { release: "australia", ...filters }, 1, -1)[0]?.sourcePath).toBe(chunk!.sourcePath);
+    }
     database.close();
   });
 

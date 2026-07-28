@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import Database from "libsql";
+import { DatabaseSync, type StatementSync } from "node:sqlite";
 import * as sqliteVec from "sqlite-vec";
 import type { DocumentChunk, IndexManifest, SearchFilters, SearchResult } from "./types.js";
 
@@ -11,11 +11,11 @@ interface StoredSource {
 
 export function readStoredEmbeddingProfile(filename: string): string | null {
   if (!fs.existsSync(filename)) return null;
-  const database = new Database(filename, { readonly: true, fileMustExist: true });
+  const database = new DatabaseSync(filename, { readOnly: true });
   try {
-    const hasSettings = database.prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'settings'").get() as { found: number } | undefined;
+    const hasSettings = scalar<number>(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings'").get());
     if (!hasSettings) return null;
-    return (database.prepare("SELECT value FROM settings WHERE key = 'embedding_profile'").get() as { value: string } | undefined)?.value ?? null;
+    return scalar<string>(database.prepare("SELECT value FROM settings WHERE key = 'embedding_profile'").get()) ?? null;
   } finally {
     database.close();
   }
@@ -44,8 +44,22 @@ interface SearchRow {
   rank?: number;
 }
 
-function vectorBuffer(vector: Float32Array): Buffer {
-  return Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength);
+function vectorBuffer(vector: Float32Array): Uint8Array {
+  return new Uint8Array(vector.buffer, vector.byteOffset, vector.byteLength);
+}
+
+function scalar<T>(row: Record<string, unknown> | undefined): T | undefined {
+  return row ? Object.values(row)[0] as T : undefined;
+}
+
+function scalarRows<T>(rows: Record<string, unknown>[]): T[] {
+  return rows.map((row) => Object.values(row)[0] as T);
+}
+
+const OMITTED_METADATA_KEYS = new Set(["full_content", "section_content", "parameters", "returns", "examples"]);
+
+function storedMetadata(metadata: Record<string, unknown>): string {
+  return JSON.stringify(Object.fromEntries(Object.entries(metadata).filter(([key]) => !OMITTED_METADATA_KEYS.has(key))));
 }
 
 function ftsQuery(query: string): string {
@@ -126,22 +140,22 @@ function filterValues(filters: SearchFilters): Array<string | null> {
     .flatMap((value) => [value, value]);
 }
 
-function metadataBounds(value: string | undefined): [string, string] {
-  return value === undefined ? ["", "\u{10ffff}"] : [value, value];
-}
-
 export class DocumentationSearchDatabase {
-  readonly db: Database.Database;
+  readonly db: DatabaseSync;
+  private readonly semanticStatements = new Map<number, StatementSync>();
+  private keywordStatement?: StatementSync;
 
   constructor(readonly filename: string, readonly dimensions: number) {
     fs.mkdirSync(path.dirname(filename), { recursive: true });
-    this.db = new Database(filename);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("foreign_keys = ON");
-    this.db.pragma("synchronous = NORMAL");
-    this.db.pragma("temp_store = MEMORY");
-    this.db.pragma("cache_size = -64000");
-    this.db.pragma("mmap_size = 268435456");
+    this.db = new DatabaseSync(filename, { allowExtension: true, timeout: 5_000 });
+    this.db.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA foreign_keys = ON;
+      PRAGMA synchronous = NORMAL;
+      PRAGMA temp_store = MEMORY;
+      PRAGMA cache_size = -64000;
+      PRAGMA mmap_size = 268435456;
+    `);
     sqliteVec.load(this.db);
     this.migrate();
   }
@@ -154,6 +168,7 @@ export class DocumentationSearchDatabase {
         source_path TEXT NOT NULL,
         blob_sha TEXT NOT NULL,
         content_hash TEXT NOT NULL,
+        content TEXT NOT NULL,
         PRIMARY KEY (release, source_path)
       );
       CREATE TABLE IF NOT EXISTS documents (
@@ -167,13 +182,36 @@ export class DocumentationSearchDatabase {
       CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(release, source_path);
       CREATE INDEX IF NOT EXISTS idx_documents_object_method ON documents(object_name, method_name);
       CREATE INDEX IF NOT EXISTS idx_documents_filters ON documents(release, doc_type, publication, chunk_type, topic_type);
-      CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(title, heading, object_name, method_name, content);
+      CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+        title, heading, object_name, method_name, content,
+        content='documents', content_rowid='id'
+      );
     `);
-    const ftsSchema = (this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'documents_fts'").get() as { sql: string } | undefined)?.sql;
-    if (!ftsSchema?.includes("object_name") || !ftsSchema.includes("method_name")) {
+    const sourceColumns = this.db.prepare("PRAGMA table_info(sources)").all() as Array<{ name: string }>;
+    if (!sourceColumns.some((column) => column.name === "content")) {
+      throw new Error("Index predates normalized source storage. Run reset-index --yes and re-index the documentation.");
+    }
+    const ftsSchema = scalar<string>(this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'documents_fts'").get());
+    if (!ftsSchema?.includes("object_name") || !ftsSchema.includes("method_name") || !ftsSchema.includes("content='documents'")) {
       throw new Error("Index uses an older search schema. Run reset-index --yes and re-index the documentation.");
     }
-    const storedDimensions = (this.db.prepare("SELECT value FROM settings WHERE key = 'dimensions'").get() as { value: string } | undefined)?.value;
+    this.db.exec(`
+      CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+        INSERT INTO documents_fts(rowid, title, heading, object_name, method_name, content)
+        VALUES (new.id, new.title, new.heading, new.object_name, new.method_name, new.content);
+      END;
+      CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+        INSERT INTO documents_fts(documents_fts, rowid, title, heading, object_name, method_name, content)
+        VALUES ('delete', old.id, old.title, old.heading, old.object_name, old.method_name, old.content);
+      END;
+      CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+        INSERT INTO documents_fts(documents_fts, rowid, title, heading, object_name, method_name, content)
+        VALUES ('delete', old.id, old.title, old.heading, old.object_name, old.method_name, old.content);
+        INSERT INTO documents_fts(rowid, title, heading, object_name, method_name, content)
+        VALUES (new.id, new.title, new.heading, new.object_name, new.method_name, new.content);
+      END;
+    `);
+    const storedDimensions = scalar<string>(this.db.prepare("SELECT value FROM settings WHERE key = 'dimensions'").get());
     if (storedDimensions && Number(storedDimensions) !== this.dimensions) {
       throw new Error(`Index uses ${storedDimensions}-dimensional embeddings, but provider uses ${this.dimensions}. Remove the index or use a matching model.`);
     }
@@ -186,7 +224,7 @@ export class DocumentationSearchDatabase {
       chunk_type text,
       topic_type text
     )`);
-    const vectorSchema = (this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'document_vectors'").get() as { sql: string } | undefined)?.sql;
+    const vectorSchema = scalar<string>(this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'document_vectors'").get());
     if (!vectorSchema?.includes("distance_metric=cosine")) {
       throw new Error("Index uses the legacy L2 vector metric. Remove the index and run nowdev-ai-toolbox-documentationsearch init to rebuild it with cosine distance.");
     }
@@ -202,8 +240,20 @@ export class DocumentationSearchDatabase {
     this.db.close();
   }
 
+  private transaction<T>(action: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = action();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   embeddingProfile(): string | null {
-    return (this.db.prepare("SELECT value FROM settings WHERE key = 'embedding_profile'").get() as { value: string } | undefined)?.value ?? null;
+    return scalar<string>(this.db.prepare("SELECT value FROM settings WHERE key = 'embedding_profile'").get()) ?? null;
   }
 
   setEmbeddingProfile(profile: string): void {
@@ -215,44 +265,55 @@ export class DocumentationSearchDatabase {
     return new Map(rows.map((row) => [row.source_path, { blobSha: row.blob_sha, contentHash: row.content_hash }]));
   }
 
-  private removeSources(release: string, sourcePaths: string[]): void {
-    const ids = this.db.prepare("SELECT id FROM documents WHERE release = ? AND source_path = ?");
-    const deleteVector = this.db.prepare("DELETE FROM document_vectors WHERE rowid = ?");
-    const deleteFts = this.db.prepare("DELETE FROM documents_fts WHERE rowid = ?");
-    const deleteDocs = this.db.prepare("DELETE FROM documents WHERE release = ? AND source_path = ?");
-    const deleteSource = this.db.prepare("DELETE FROM sources WHERE release = ? AND source_path = ?");
-    for (const sourcePath of sourcePaths) {
-      for (const row of ids.all(release, sourcePath) as Array<{ id: number }>) {
-        deleteVector.run(row.id);
-        deleteFts.run(row.id);
+  replaceSources(release: string, sources: Array<{ path: string; blobSha: string; contentHash: string; content?: string; chunks: DocumentChunk[]; embeddings: Float32Array[] }>, deletedPaths: string[]): void {
+    const remove = (sourcePaths: string[]) => {
+      const ids = this.db.prepare("SELECT id FROM documents WHERE release = ? AND source_path = ?");
+      const deleteVector = this.db.prepare("DELETE FROM document_vectors WHERE rowid = ?");
+      const deleteDocs = this.db.prepare("DELETE FROM documents WHERE release = ? AND source_path = ?");
+      const deleteSource = this.db.prepare("DELETE FROM sources WHERE release = ? AND source_path = ?");
+      for (const sourcePath of sourcePaths) {
+        for (const row of ids.all(release, sourcePath) as Array<{ id: number }>) {
+          deleteVector.run(row.id);
+        }
+        deleteDocs.run(release, sourcePath);
+        deleteSource.run(release, sourcePath);
       }
-      deleteDocs.run(release, sourcePath);
-      deleteSource.run(release, sourcePath);
-    }
-  }
-
-  replaceSources(release: string, sources: Array<{ path: string; blobSha: string; contentHash: string; chunks: DocumentChunk[]; embeddings: Float32Array[] }>, deletedPaths: string[]): void {
-    const insert = this.db.transaction(() => {
-      this.removeSources(release, [...deletedPaths, ...sources.map((source) => source.path)]);
+    };
+    this.transaction(() => {
+      remove([...deletedPaths, ...sources.map((source) => source.path)]);
       const insertDocument = this.db.prepare(`INSERT INTO documents (
         doc_type, publication, source_path, release, chunk_type, chunk_index, title, heading,
         content, topic_type, product, classification, last_updated, object_name, method_name, metadata, content_hash
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-      const insertFts = this.db.prepare("INSERT INTO documents_fts(rowid, title, heading, object_name, method_name, content) VALUES (?, ?, ?, ?, ?, ?)");
       const insertVector = this.db.prepare("INSERT INTO document_vectors(rowid, embedding, release, doc_type, publication, chunk_type, topic_type) VALUES (?, ?, ?, ?, ?, ?, ?)");
-      const insertSource = this.db.prepare("INSERT INTO sources(release, source_path, blob_sha, content_hash) VALUES (?, ?, ?, ?)");
+      const insertSource = this.db.prepare("INSERT INTO sources(release, source_path, blob_sha, content_hash, content) VALUES (?, ?, ?, ?, ?)");
       for (const source of sources) {
         if (source.chunks.length !== source.embeddings.length) throw new Error(`Embedding count mismatch for ${source.path}`);
         source.chunks.forEach((chunk, index) => {
-          const result = insertDocument.run(chunk.docType, chunk.publication, chunk.sourcePath, chunk.release, chunk.chunkType, chunk.chunkIndex, chunk.title, chunk.heading, chunk.content, chunk.topicType, chunk.product, chunk.classification, chunk.lastUpdated, chunk.objectName, chunk.methodName, JSON.stringify(chunk.metadata), chunk.contentHash);
+          const result = insertDocument.run(chunk.docType, chunk.publication, chunk.sourcePath, chunk.release, chunk.chunkType, chunk.chunkIndex, chunk.title, chunk.heading, chunk.content, chunk.topicType, chunk.product, chunk.classification, chunk.lastUpdated, chunk.objectName, chunk.methodName, storedMetadata(chunk.metadata), chunk.contentHash);
           const id = BigInt(result.lastInsertRowid);
-          insertFts.run(id, chunk.title, chunk.heading, chunk.objectName, chunk.methodName, chunk.content);
           insertVector.run(id, vectorBuffer(source.embeddings[index]!), chunk.release, chunk.docType, chunk.publication, chunk.chunkType, chunk.topicType ?? "");
         });
-        insertSource.run(release, source.path, source.blobSha, source.contentHash);
+        const fallbackContent = source.chunks.find((chunk) => typeof chunk.metadata.full_content === "string")?.metadata.full_content ?? source.chunks.map((chunk) => chunk.content).join("\n\n");
+        insertSource.run(release, source.path, source.blobSha, source.contentHash, source.content ?? String(fallbackContent));
       }
     });
-    insert();
+  }
+
+  private semanticSearch(embedding: Float32Array, candidates: number, release: string, filters: SearchFilters): SearchRow[] {
+    const values = [filters.docType, filters.publication, filters.chunkType, filters.topicType];
+    const mask = values.reduce((result, value, index) => result | (value === undefined ? 0 : 1 << index), 0);
+    const parameters = values.filter((value): value is string => value !== undefined);
+    const predicates = ["v.doc_type = ?", "v.publication = ?", "v.chunk_type = ?", "v.topic_type = ?"]
+      .filter((_, index) => mask & (1 << index));
+    let statement = this.semanticStatements.get(mask);
+    if (!statement) {
+      statement = this.db.prepare(`SELECT d.*, v.distance FROM document_vectors v JOIN documents d ON d.id = v.rowid
+        WHERE v.embedding MATCH ? AND k = ? AND v.release = ?${predicates.length ? ` AND ${predicates.join(" AND ")}` : ""}
+        ORDER BY v.distance LIMIT ?`);
+      this.semanticStatements.set(mask, statement);
+    }
+    return statement.all(vectorBuffer(embedding), candidates, release, ...parameters, candidates) as unknown as SearchRow[];
   }
 
   search(query: string, embedding: Float32Array, filters: SearchFilters, limit = 10, threshold = 0.3, deduplicateReleases = false, maxResultsPerSource = 3): SearchResult[] {
@@ -266,38 +327,23 @@ export class DocumentationSearchDatabase {
       AND (? IS NULL OR d.chunk_type = ?)
       AND (? IS NULL OR d.topic_type = ?)`;
     const filtersParameters = filterValues(filters);
-    const semanticStatement = this.db.prepare(`
-      SELECT d.*, v.distance FROM document_vectors v JOIN documents d ON d.id = v.rowid
-      WHERE v.embedding MATCH ? AND k = ?
-        AND v.release = ?
-        AND v.doc_type >= ? AND v.doc_type <= ?
-        AND v.publication >= ? AND v.publication <= ?
-        AND v.chunk_type >= ? AND v.chunk_type <= ?
-        AND v.topic_type >= ? AND v.topic_type <= ?
-      ORDER BY v.distance LIMIT ?
-    `);
     const releases = filters.release
       ? [filters.release.toLowerCase()]
-      : this.db.prepare("SELECT DISTINCT release FROM documents ORDER BY release").pluck().all() as string[];
-    const semanticMetadataParameters = [
-      ...metadataBounds(filters.docType),
-      ...metadataBounds(filters.publication),
-      ...metadataBounds(filters.chunkType),
-      ...metadataBounds(filters.topicType),
-    ];
+      : scalarRows<string>(this.db.prepare("SELECT DISTINCT release FROM documents ORDER BY release").all());
     const semantic = releases
-      .flatMap((release) => semanticStatement.all(vectorBuffer(embedding), candidates, release, ...semanticMetadataParameters, candidates) as SearchRow[])
+      .flatMap((release) => this.semanticSearch(embedding, candidates, release, filters))
       .sort((left, right) => (left.distance ?? 1) - (right.distance ?? 1))
       .slice(0, candidates);
     const keywordExpression = ftsQuery(query);
-    const keyword = keywordExpression ? this.db.prepare(`
+    this.keywordStatement ??= this.db.prepare(`
       SELECT d.*, bm25(documents_fts, 10.0, 7.0, 9.0, 9.0, 1.0) AS rank, vec_distance_cosine(v.embedding, ?) AS distance
       FROM documents_fts f
       JOIN documents d ON d.id = f.rowid
       JOIN document_vectors v ON v.rowid = d.id
       WHERE documents_fts MATCH ?${filtersSql}
       ORDER BY bm25(documents_fts, 10.0, 7.0, 9.0, 9.0, 1.0) LIMIT ?
-    `).all(vectorBuffer(embedding), keywordExpression, ...filtersParameters, candidates) as SearchRow[] : [];
+    `);
+    const keyword = keywordExpression ? this.keywordStatement.all(vectorBuffer(embedding), keywordExpression, ...filtersParameters, candidates) as unknown as SearchRow[] : [];
     const terms = new Set(queryTerms(query));
     const keywordWeight = looksLikeApiQuery(query) ? 1.25 : 1;
     const scores = new Map<number, { row: SearchRow; score: number; similarity: number }>();
@@ -341,8 +387,15 @@ export class DocumentationSearchDatabase {
   getDocument(sourcePath: string, release?: string): DocumentChunk[] {
     const rows = (release
       ? this.db.prepare("SELECT * FROM documents WHERE source_path = ? AND release = ? ORDER BY chunk_index").all(sourcePath, release.toLowerCase())
-      : this.db.prepare("SELECT * FROM documents WHERE source_path = ? ORDER BY release DESC, chunk_index").all(sourcePath)) as SearchRow[];
+      : this.db.prepare("SELECT * FROM documents WHERE source_path = ? ORDER BY release DESC, chunk_index").all(sourcePath)) as unknown as SearchRow[];
     return rows.map(rowToChunk);
+  }
+
+  getSourceContent(sourcePath: string, release?: string): string | null {
+    const row = release
+      ? this.db.prepare("SELECT content FROM sources WHERE source_path = ? AND release = ?").get(sourcePath, release.toLowerCase())
+      : this.db.prepare("SELECT content FROM sources WHERE source_path = ? ORDER BY release DESC LIMIT 1").get(sourcePath);
+    return scalar<string>(row) ?? null;
   }
 
   listPublications(release?: string): Array<{ publication: string; docType: string; release: string; documentCount: number }> {
@@ -357,9 +410,9 @@ export class DocumentationSearchDatabase {
   }
 
   stats(): { documents: number; chunks: number; releases: string[] } {
-    const chunks = (this.db.prepare("SELECT COUNT(*) AS count FROM documents").get() as { count: number }).count;
-    const documents = (this.db.prepare("SELECT COUNT(*) AS count FROM sources").get() as { count: number }).count;
-    const releases = this.db.prepare("SELECT DISTINCT release FROM sources ORDER BY release").pluck().all() as string[];
+    const chunks = scalar<number>(this.db.prepare("SELECT COUNT(*) FROM documents").get())!;
+    const documents = scalar<number>(this.db.prepare("SELECT COUNT(*) FROM sources").get())!;
+    const releases = scalarRows<string>(this.db.prepare("SELECT DISTINCT release FROM sources ORDER BY release").all());
     return { documents, chunks, releases };
   }
 
@@ -368,7 +421,7 @@ export class DocumentationSearchDatabase {
   }
 
   manifest(): IndexManifest | null {
-    const value = (this.db.prepare("SELECT value FROM settings WHERE key = 'manifest'").get() as { value: string } | undefined)?.value;
+    const value = scalar<string>(this.db.prepare("SELECT value FROM settings WHERE key = 'manifest'").get());
     return value ? JSON.parse(value) as IndexManifest : null;
   }
 }

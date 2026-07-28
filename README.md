@@ -4,11 +4,11 @@
 
 ## Requirements
 
-- Node.js 20.12 or newer
+- Node.js 22.13 or newer
 - Internet access during initial documentation and model download
-- Approximately 500 MB to 1 GB of free cache space for a full family
+- Several GB of free cache space for a full family; size varies by release and embedding profile
 
-The local SQLite engine (libsql) ships prebuilt native binaries for macOS, Windows x64, and Linux (both glibc and musl, x64/arm64/arm), so npm installs it without needing a C++ compiler or Python on any of those platforms. Windows on ARM64 is the one common exception without a prebuilt binary.
+DocumentationSearch uses Node's built-in `node:sqlite` module, so it does not depend on the `better-sqlite3` native addon or require its build toolchain. The `sqlite-vec` package supplies the platform-specific vector extension loaded by `node:sqlite`.
 
 ## Install
 
@@ -52,13 +52,13 @@ Embedding runs on the native ONNX Runtime CPU provider by default. On Windows, D
 nowdev-ai-toolbox-documentationsearch --device dml init --family australia --area all-docs
 ```
 
-Use `--embedding-batch-size 16` to trade more GPU memory for throughput when the default is stable. Each passage sent to the model is capped at 2048 characters by default to keep BGE inputs near its 512-token limit and avoid large padded tensors; the full source remains available through `get`. Adjust this with `--embedding-max-characters`. Changing the cap requires rebuilding the index with `reset-index --yes` because it changes document vectors. The provider halves a batch after an ordinary native out-of-memory error and falls back to CPU if DirectML suspends the GPU device. Use `--device webgpu` for ONNX Runtime's experimental WebGPU provider, or `--device cpu` to select the native CPU path explicitly. Device selection does not require rebuilding an existing index, but the same device option should be used for both indexing and searching when comparing performance. GPU provider initialization is environment-dependent; if it fails, rerun with `--device cpu`. `status` reports the active embedding device so a DirectML fallback is visible.
+Use `--embedding-batch-size 16` to trade more GPU memory for throughput when the default is stable. Passage caps are profile-specific: MiniLM defaults to 1024 characters near its 256-token limit, while the other built-in profiles default to 2048. The full source remains available through `get`. Adjust this with `--embedding-max-characters`. Changing the cap requires rebuilding the index with `reset-index --yes` because it changes document vectors. The provider halves a batch after an ordinary native out-of-memory error and falls back to CPU if DirectML suspends the GPU device. Use `--device webgpu` for ONNX Runtime's experimental WebGPU provider, or `--device cpu` to select the native CPU path explicitly. Device selection does not require rebuilding an existing index, but the same device option should be used for both indexing and searching when comparing performance. GPU provider initialization is environment-dependent; if it fails, rerun with `--device cpu`. `status` reports the active embedding device so a DirectML fallback is visible.
 
 CPU inference (including after a DirectML fallback) uses the host's full logical core count for ONNX Runtime's intra-op thread pool by default. Override this with `--embedding-threads <count>` on machines where using every core isn't appropriate, such as a shared server or a container with a CPU limit lower than the host's core count.
 
 Search `--limit` accepts integers from 1 to 50. `--threshold` is the minimum cosine similarity and accepts values from -1 to 1; exact API object or method keyword matches are retained below that threshold so queries such as `set workflow` can resolve `setWorkflow`. Results use hybrid reciprocal-rank fusion, weighted FTS5 title and heading matches, exact API object/method boosts, and query-aware chunk-type weighting. Results are limited to three chunks per source by default; adjust this with `--max-per-source` or use `--max-per-source 1` for more diverse results. Use `--deduplicate-releases` to retain only the highest-ranked release of each source path and chunk index when searching across multiple releases.
 
-The current index schema stores API object and method names as dedicated FTS5 fields, partitions the vector index by release, and stores document type, publication, chunk type, and topic type as sqlite-vec metadata so filters are applied before nearest-neighbor candidates are selected. Topic and API chunks are prepared at paragraph or code-line boundaries under the BGE input budget. Existing indexes from earlier releases must be removed and rebuilt:
+The current index schema stores API object and method names as dedicated FTS5 fields, partitions the vector index by release, and stores document type, publication, chunk type, and topic type as sqlite-vec metadata so supplied equality filters are applied before nearest-neighbor candidates are selected. Topic and API chunks are prepared at paragraph or code-line boundaries under the active profile's input budget. Existing indexes from earlier schema versions must be removed and rebuilt:
 
 ```bash
 nowdev-ai-toolbox-documentationsearch reset-index --yes
@@ -134,7 +134,7 @@ The skill teaches agents to inspect index status, use release-filtered hybrid se
 
 ## Storage and Search
 
-The local SQLite database uses ordinary tables for metadata and update state, FTS5 for keyword retrieval, and `sqlite-vec` for cosine-distance vector retrieval. The vector index is partitioned by release, and all supported vector filters are evaluated inside sqlite-vec before candidate selection. Reciprocal Rank Fusion, weighted BM25 fields, exact normalized API identifier matching, and query-aware chunk-type weighting produce the final result order. FTS5 segments are optimized after non-empty indexing updates.
+The local database uses Node's built-in `node:sqlite`, an external-content FTS5 index for keyword retrieval, and `sqlite-vec` for exact cosine-distance vector retrieval. Full source text is stored once per source document; per-chunk rows retain compact searchable content and structured metadata. The vector table is partitioned by release, and supplied metadata equality filters are evaluated inside sqlite-vec before candidate selection. Reciprocal Rank Fusion, weighted BM25 fields, exact normalized API identifier matching, and query-aware chunk-type weighting produce the final result order. FTS5 segments are optimized after non-empty indexing updates.
 
 The default model for new indexes is `Xenova/all-MiniLM-L6-v2`, a Transformers.js-compatible quantized ONNX model using mean pooling and normalized 384-dimensional embeddings. Its profile uses a conservative 1024-character input cap near the model's 256-token sentence-transformer limit. BGE remains available with `--embedding-profile bge-base-en-v1.5` for normalized 768-dimensional embeddings and a 2048-character cap. Model files are cached and reused.
 

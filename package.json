@@ -24,11 +24,11 @@
     "sqlite"
   ],
   "engines": {
-    "node": ">=20.12"
+    "node": ">=22.13"
   },
   "bin": {
-    "nowdev-ai-toolbox-documentationsearch": "./dist/cli.js",
-    "nowdev-ai-toolbox-documentationsearch-mcp": "./dist/mcp.js"
+    "nowdev-ai-toolbox-documentationsearch": "./dist/cli-entry.js",
+    "nowdev-ai-toolbox-documentationsearch-mcp": "./dist/mcp-entry.js"
   },
   "exports": {
     ".": {
@@ -51,7 +51,6 @@
     "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^15.0.0",
-    "libsql": "^0.5.29",
     "sqlite-vec": "^0.1.9",
     "yaml": "^2.8.1",
     "zod": "^4.1.12"

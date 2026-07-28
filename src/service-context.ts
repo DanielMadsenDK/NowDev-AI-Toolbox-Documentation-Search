@@ -71,6 +71,7 @@ interface ParsedSource {
   path: string;
   blobSha: string;
   contentHash: string;
+  content: string;
   chunks: DocumentChunk[];
 }
 
@@ -193,7 +194,8 @@ export class DocumentationSearch {
       }
       processed += 1;
       progress(`Prepared ${processed}/${changed.length}: ${entry.path}`);
-      return { parsed: { path: entry.path, blobSha: entry.blobSha, contentHash: contentHash(markdown), chunks } };
+      const sourceContent = chunks.find((chunk) => typeof chunk.metadata.full_content === "string")?.metadata.full_content;
+      return { parsed: { path: entry.path, blobSha: entry.blobSha, contentHash: contentHash(markdown), content: typeof sourceContent === "string" ? sourceContent : markdown, chunks } };
     });
     const failures: IndexFailure[] = [];
     const prepared: Array<{ path: string; chunkCount: number }> = [];
@@ -354,9 +356,10 @@ export class DocumentationSearch {
   }
 
   getDocument(sourcePath: string, release?: string) {
-    return this.database.getDocument(sourcePath, release).map((chunk) => ({
+    const sourceContent = this.database.getSourceContent(sourcePath, release);
+    return this.database.getDocument(sourcePath, release).map((chunk, index) => ({
       ...chunk,
-      content: String(chunk.metadata.full_content ?? chunk.metadata.section_content ?? chunk.content),
+      content: index === 0 && sourceContent ? sourceContent : chunk.content,
       metadata: Object.fromEntries(Object.entries(chunk.metadata).filter(([key]) => key !== "full_content" && key !== "section_content")),
     }));
   }
