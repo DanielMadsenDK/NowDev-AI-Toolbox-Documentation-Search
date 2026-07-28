@@ -14,6 +14,23 @@ const GLOSSARY_PREFIX = "markdown/glossary/";
 const TOP_LEVEL_API = /^markdown\/api-reference\/[^/]+\.md$/;
 const METHOD_HEADING = /^##\s+(.+?)(?:\s+[-–—]\s*|\s*[-–—]\s+)(.+?)\s*$/;
 const CODE_FENCE = /```[\w+-]*\n([\s\S]*?)\n```/g;
+
+// Docs sometimes show markdown/example output inside fenced code blocks (e.g. a snippet
+// demonstrating what a heading looks like). Without this, a line like "## Foo - bar()" inside
+// a fence would be misread as a real section boundary and corrupt the chunk hierarchy.
+function codeFenceMask(lines: string[]): boolean[] {
+  const inside = new Array<boolean>(lines.length);
+  let inCodeBlock = false;
+  lines.forEach((line, index) => {
+    if (line.trim().startsWith("```")) {
+      inside[index] = true;
+      inCodeBlock = !inCodeBlock;
+      return;
+    }
+    inside[index] = inCodeBlock;
+  });
+  return inside;
+}
 // Derived from the embedder's default character cap (config.ts), minus headroom for a document-embedding prefix, so the chunker's budget and the embedder's truncation (embedder.ts truncateEmbeddingText) can't silently drift apart and clip content mid-chunk.
 export const MAX_CHUNK_CHARACTERS = DEFAULT_MAX_EMBEDDING_CHARACTERS - 256;
 
@@ -289,7 +306,9 @@ function chunkApiDoc(sourcePath: string, markdown: string, branch: string, famil
     deprecated: /\(\s*deprecated\s*\)/i.test(normalizeMarkdown(title)),
   };
   const lines = body.split("\n");
+  const inCodeFence = codeFenceMask(lines);
   const positions = lines.flatMap((line, index) => {
+    if (inCodeFence[index]) return [];
     const match = line.trim().match(METHOD_HEADING);
     return match ? [{ objectName: match[1]!.trim(), signature: match[2]!.trim(), index }] : [];
   });
@@ -378,7 +397,8 @@ function chunkTopicDoc(sourcePath: string, markdown: string, branch: string, fam
   const release = text(frontmatter.release) || family;
   const metadata = baseTopicMetadata(sourcePath, frontmatter, branch, family, title, release);
   const lines = body.split("\n");
-  const headings = lines.flatMap((line, index) => line.trim().startsWith("## ") ? [{ heading: line.trim().slice(3).trim(), index }] : []);
+  const inCodeFence = codeFenceMask(lines);
+  const headings = lines.flatMap((line, index) => !inCodeFence[index] && line.trim().startsWith("## ") ? [{ heading: line.trim().slice(3).trim(), index }] : []);
   const firstHeading = headings[0]?.index ?? lines.length;
   const common = {
     docType: classifyDocType(sourcePath), publication: publicationFromPath(sourcePath), sourcePath, release,
@@ -408,7 +428,8 @@ function chunkGlossary(sourcePath: string, markdown: string, branch: string, fam
   const title = extractTitle(body, frontmatter);
   const release = text(frontmatter.release) || family;
   const lines = body.split("\n");
-  const terms = lines.flatMap((line, index) => line.trim().startsWith("### ") ? [{ term: line.trim().slice(4).trim(), index }] : []);
+  const inCodeFence = codeFenceMask(lines);
+  const terms = lines.flatMap((line, index) => !inCodeFence[index] && line.trim().startsWith("### ") ? [{ term: line.trim().slice(4).trim(), index }] : []);
   const common = {
     docType: "glossary" as const, publication: publicationFromPath(sourcePath), sourcePath, release, title,
     topicType: "reference", product: "ServiceNow AI Platform", classification: "glossary",
