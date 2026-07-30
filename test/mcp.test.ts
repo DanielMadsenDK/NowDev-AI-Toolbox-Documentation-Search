@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatSearchResults } from "../src/mcp.js";
+import { formatSearchResults, MCP_TOOL_DESCRIPTIONS } from "../src/mcp.js";
 import type { SearchResult } from "../src/types.js";
 
 const searchResult: SearchResult = {
@@ -40,5 +40,14 @@ describe("MCP search results", () => {
 
   it("preserves detailed metadata when explicitly requested", () => {
     expect(formatSearchResults([searchResult], true)).toEqual([searchResult]);
+  });
+
+  it("describes the recommended search, retrieval, and update workflow", () => {
+    expect(MCP_TOOL_DESCRIPTIONS.search).toContain("original wording");
+    expect(MCP_TOOL_DESCRIPTIONS.search).toContain("before applying");
+    expect(MCP_TOOL_DESCRIPTIONS.outline).toContain("Prefer this");
+    expect(MCP_TOOL_DESCRIPTIONS.document).toContain("full documents can be large");
+    expect(MCP_TOOL_DESCRIPTIONS.status).toContain("Call before");
+    expect(MCP_TOOL_DESCRIPTIONS.update).toContain("mutates the local index");
   });
 });

@@ -17,6 +17,15 @@ type CompactSearchResult = Omit<SearchResult, "metadata" | "contentHash"> & {
 	sourceUrl?: string;
 };
 
+export const MCP_TOOL_DESCRIPTIONS = {
+	search: "Hybrid semantic and keyword search over the local ServiceNow documentation index. Start with the user's original wording and a release filter when known; inspect that baseline before applying docType, publication, chunkType, or topicType filters. docType is the indexed source classification, not the ServiceNow topic; leave it unset for procedural questions. Use maxResultsPerSource: 1 for broad topic discovery.",
+	document: "Fetch complete indexed chunks for a selected ServiceNowDocs source path. Use only when the matching search result and its outline cannot establish the answer; full documents can be large.",
+	outline: "Fetch headings and concise previews for a selected ServiceNowDocs source path. Prefer this after a relevant but incomplete search result or when document scope is unclear; use the same sourcePath selected from search.",
+	publications: "List locally indexed publications and document counts. Use this to discover publication filters after inspecting an unfiltered search result.",
+	status: "Inspect local index size, indexed releases, location, and embedding configuration. Call before release-specific searches or before initializing/updating an index.",
+	update: "Download and incrementally index public ServiceNowDocs content. This mutates the local index; use only when requested. Use limit for a smoke test, avoid refresh for routine updates, and inspect failures before relying on complete coverage.",
+} as const;
+
 export function formatSearchResults(results: SearchResult[], includeMetadata: boolean): Array<SearchResult | CompactSearchResult> {
 	if (includeMetadata) return results;
 	return results.map(({ metadata, contentHash: _contentHash, ...searchResult }) => {
@@ -31,7 +40,7 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 
 	server.registerTool("search_servicenow_docs", {
 		title: "Search ServiceNow documentation",
-		description: "Hybrid semantic and keyword search over the local ServiceNow documentation index. docType filters the indexed source classification, not the ServiceNow topic; leave it unset for procedural questions.",
+		description: MCP_TOOL_DESCRIPTIONS.search,
 		inputSchema: z.object({
 			query: z.string().min(1),
 			limit: z.number().int().min(1).max(50).default(10),
@@ -50,35 +59,35 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 
 	server.registerTool("get_servicenow_document", {
 		title: "Get ServiceNow document",
-		description: "Fetch complete indexed chunks for a ServiceNowDocs source path.",
+		description: MCP_TOOL_DESCRIPTIONS.document,
 		inputSchema: z.object({ sourcePath: z.string().min(1), release: z.string().optional() }),
 		annotations: { readOnlyHint: true, idempotentHint: true },
 	}, async ({ sourcePath, release }) => result(context.getDocument(sourcePath, release)));
 
 	server.registerTool("get_servicenow_document_outline", {
 		title: "Get ServiceNow document outline",
-		description: "Fetch headings and concise previews for a ServiceNowDocs source path.",
+		description: MCP_TOOL_DESCRIPTIONS.outline,
 		inputSchema: z.object({ sourcePath: z.string().min(1), release: z.string().optional() }),
 		annotations: { readOnlyHint: true, idempotentHint: true },
 	}, async ({ sourcePath, release }) => result(context.getDocumentOutline(sourcePath, release)));
 
 	server.registerTool("list_servicenow_publications", {
 		title: "List ServiceNow publications",
-		description: "List locally indexed publications and document counts.",
+		description: MCP_TOOL_DESCRIPTIONS.publications,
 		inputSchema: z.object({ release: z.string().optional() }),
 		annotations: { readOnlyHint: true, idempotentHint: true },
 	}, async ({ release }) => result(context.listPublications(release)));
 
 	server.registerTool("get_documentation_search_status", {
 		title: "Get DocumentationSearch status",
-		description: "Inspect local index size, releases, location, and embedding model configuration.",
+		description: MCP_TOOL_DESCRIPTIONS.status,
 		inputSchema: z.object({}),
 		annotations: { readOnlyHint: true, idempotentHint: true },
 	}, async () => result(context.status()));
 
 	server.registerTool("update_servicenow_docs", {
 		title: "Update ServiceNow documentation",
-		description: "Download and incrementally index public ServiceNowDocs content. This can take time on first use.",
+		description: MCP_TOOL_DESCRIPTIONS.update,
 		inputSchema: z.object({
 			family: z.string().default("australia"),
 			branch: z.string().optional(),
