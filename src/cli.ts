@@ -27,6 +27,7 @@ interface GlobalOptions {
 	embeddingEndpointBatchSize?: number;
 	embeddingEndpointConcurrency?: number;
 	embeddingEndpointTimeout?: number;
+	vectorOversample?: number;
 }
 
 function integerOption(name: string, minimum: number, maximum: number) {
@@ -77,6 +78,7 @@ function createContext(command: Command): DocumentationSearch {
 		embeddingEndpointBatchSize: options.embeddingEndpointBatchSize,
 		embeddingEndpointConcurrency: options.embeddingEndpointConcurrency,
 		embeddingEndpointTimeoutMilliseconds: options.embeddingEndpointTimeout === undefined ? undefined : options.embeddingEndpointTimeout * 1000,
+		vectorOversample: options.vectorOversample,
 		embeddingProvider: options.deterministicEmbeddings ? new HashEmbeddingProvider() : undefined,
 	});
 }
@@ -126,6 +128,7 @@ const program = new Command()
 	.option("--embedding-endpoint-batch-size <count>", "texts per remote embedding request (default: 64)", integerOption("embedding-endpoint-batch-size", 1, 1024))
 	.option("--embedding-endpoint-concurrency <count>", "concurrent remote embedding requests (default: 4)", integerOption("embedding-endpoint-concurrency", 1, 32))
 	.option("--embedding-endpoint-timeout <seconds>", "remote request timeout before retrying (default: 30)", integerOption("embedding-endpoint-timeout", 1, 600))
+	.option("--vector-oversample <count>", "binary vector coarse candidates per final candidate (default: 8)", integerOption("vector-oversample", 1, 64))
 	.configureOutput({
 		outputError: (message, write) => {
 			if (process.argv.includes("--json")) write(`${JSON.stringify({ error: message.trim().replace(/^error:\s*/, "") })}\n`);

@@ -21,6 +21,7 @@ export interface DocumentationSearchOptions {
   embeddingEndpointBatchSize?: number;
   embeddingEndpointConcurrency?: number;
   embeddingEndpointTimeoutMilliseconds?: number;
+  vectorOversample?: number;
   embeddingProvider?: EmbeddingProvider;
   source?: GitHubDocumentationSource;
 }
@@ -152,7 +153,7 @@ export class DocumentationSearch {
       timeoutMilliseconds: options.embeddingEndpointTimeoutMilliseconds,
     }) : localEmbeddings;
     this.source = options.source ?? new GitHubDocumentationSource({ repositoryDirectory: this.paths.repository });
-    this.database = new DocumentationSearchDatabase(this.paths.database, this.embeddings.dimensions);
+    this.database = new DocumentationSearchDatabase(this.paths.database, this.embeddings.dimensions, options.vectorOversample);
     if (!options.embeddingProvider) {
       const activeProfile = this.database.embeddingProfile();
       if (activeProfile && activeProfile !== selectedProfile) {

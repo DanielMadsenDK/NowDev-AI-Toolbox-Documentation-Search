@@ -33,7 +33,7 @@ describe("DocumentationSearchDatabase", () => {
     expect(database.getSourceContent("markdown/itsm/incidents.md", "australia")).toContain("Resolve service interruptions");
     const storedMetadata = database.db.prepare("SELECT metadata FROM documents ORDER BY id").all() as Array<{ metadata: string }>;
     expect(storedMetadata.every((row) => !row.metadata.includes("full_content") && !row.metadata.includes("section_content"))).toBe(true);
-    expect(database.db.prepare("SELECT value FROM settings WHERE key = 'database_schema_version'").get()).toEqual({ value: "1" });
+    expect(database.db.prepare("SELECT value FROM settings WHERE key = 'database_schema_version'").get()).toEqual({ value: "2" });
     database.close();
   });
 
@@ -45,6 +45,30 @@ describe("DocumentationSearchDatabase", () => {
     database.replaceSources("australia", [{ path: chunk!.sourcePath, blobSha: "one", contentHash: chunk!.contentHash, chunks: [chunk!], embeddings: [Float32Array.from([1, 0])] }], []);
     expect(database.search("incident", Float32Array.from([0, 1]), {}, 10, 0.99)[0]?.sourcePath).toBe(chunk!.sourcePath);
     database.close();
+  });
+
+  it("uses binary coarse vectors and float re-scoring when dimensions support quantization", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-binary-vectors-"));
+    temporaryDirectories.push(directory);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 8);
+    const [first] = chunkDocument("markdown/guides/first.md", "# First\nNearest content.", "australia", "australia");
+    const [second] = chunkDocument("markdown/guides/second.md", "# Second\nOther content.", "australia", "australia");
+    database.replaceSources("australia", [
+      { path: first!.sourcePath, blobSha: "first", contentHash: first!.contentHash, chunks: [first!], embeddings: [Float32Array.from([1, 0, 0, 0, 0, 0, 0, 0])] },
+      { path: second!.sourcePath, blobSha: "second", contentHash: second!.contentHash, chunks: [second!], embeddings: [Float32Array.from([0, 1, 0, 0, 0, 0, 0, 0])] },
+    ], []);
+
+    const results = database.search("absent-keyword", Float32Array.from([1, 0, 0, 0, 0, 0, 0, 0]), { release: "australia" }, 1, -1);
+    expect(database.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'document_vectors'").get()).toEqual(expect.objectContaining({ sql: expect.stringContaining("coarse_embedding bit[8]") }));
+    expect(results[0]?.sourcePath).toBe(first!.sourcePath);
+    expect(results[0]?.similarity).toBeCloseTo(1, 5);
+    database.close();
+  });
+
+  it("rejects unsupported binary vector oversampling values", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-vector-oversample-"));
+    temporaryDirectories.push(directory);
+    expect(() => new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 8, 0)).toThrow("coarseVectorOversample must be an integer between 1 and 64");
   });
 
   it("preserves structured API metadata while omitting large body fields", () => {

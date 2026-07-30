@@ -157,8 +157,15 @@ export class DocumentationSearchDatabase {
   readonly db: DatabaseSync;
   private readonly semanticStatements = new Map<number, StatementSync>();
   private keywordStatement?: StatementSync;
+  private readonly usesBinaryCoarseVectors: boolean;
+  private readonly coarseVectorOversample: number;
 
-  constructor(readonly filename: string, readonly dimensions: number) {
+  constructor(readonly filename: string, readonly dimensions: number, coarseVectorOversample = 8) {
+    if (!Number.isInteger(coarseVectorOversample) || coarseVectorOversample < 1 || coarseVectorOversample > 64) {
+      throw new Error("coarseVectorOversample must be an integer between 1 and 64");
+    }
+    this.usesBinaryCoarseVectors = dimensions % 8 === 0;
+    this.coarseVectorOversample = coarseVectorOversample;
     fs.mkdirSync(path.dirname(filename), { recursive: true });
     this.db = new DatabaseSync(filename, { allowExtension: true, timeout: 5_000 });
     this.db.exec(`
@@ -225,13 +232,15 @@ export class DocumentationSearchDatabase {
         VALUES (new.id, new.title, new.heading, new.object_name, new.method_name, new.content);
       END;
     `);
+    this.db.prepare("INSERT INTO documents_fts(documents_fts, rank) VALUES ('rank', 'bm25(10.0, 7.0, 9.0, 9.0, 1.0)')").run();
     const storedDimensions = scalar<string>(this.db.prepare("SELECT value FROM settings WHERE key = 'dimensions'").get());
     if (storedDimensions && Number(storedDimensions) !== this.dimensions) {
       throw new Error(`Index uses ${storedDimensions}-dimensional embeddings, but provider uses ${this.dimensions}. Remove the index or use a matching model.`);
     }
     this.db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('dimensions', ?)").run(String(this.dimensions));
+    const coarseVectorColumn = this.usesBinaryCoarseVectors ? `, coarse_embedding bit[${this.dimensions}]` : "";
     this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS document_vectors USING vec0(
-      embedding float[${this.dimensions}] distance_metric=cosine,
+      embedding float[${this.dimensions}] distance_metric=cosine${coarseVectorColumn},
       release text partition key,
       doc_type text,
       publication text,
@@ -242,13 +251,16 @@ export class DocumentationSearchDatabase {
     if (!vectorSchema?.includes("distance_metric=cosine")) {
       throw new Error("Index uses the legacy L2 vector metric. Remove the index and run nowdev-ai-toolbox-documentationsearch init to rebuild it with cosine distance.");
     }
+    if (this.usesBinaryCoarseVectors && !vectorSchema.includes("coarse_embedding bit")) {
+      throw new Error("Index predates binary coarse vector search. Run reset-index --yes and re-index the documentation.");
+    }
     if (!vectorSchema.includes("partition key")) {
       throw new Error("Index predates release-partitioned vector search. Run reset-index --yes and re-index the documentation.");
     }
     if (!["doc_type", "publication", "chunk_type", "topic_type"].every((column) => vectorSchema.includes(column))) {
       throw new Error("Index predates metadata-filtered vector search. Run reset-index --yes and re-index the documentation.");
     }
-    const databaseSchemaVersion = 1;
+    const databaseSchemaVersion = 2;
     const storedSchemaVersion = scalar<string>(this.db.prepare("SELECT value FROM settings WHERE key = 'database_schema_version'").get());
     if (storedSchemaVersion && Number(storedSchemaVersion) !== databaseSchemaVersion) {
       throw new Error(`Index uses database schema ${storedSchemaVersion}, but this version requires ${databaseSchemaVersion}. Run reset-index --yes and re-index the documentation.`);
@@ -303,7 +315,9 @@ export class DocumentationSearchDatabase {
         doc_type, publication, source_path, release, chunk_type, chunk_index, title, heading,
         content, topic_type, product, classification, last_updated, object_name, method_name, metadata, content_hash
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-      const insertVector = this.db.prepare("INSERT INTO document_vectors(rowid, embedding, release, doc_type, publication, chunk_type, topic_type) VALUES (?, ?, ?, ?, ?, ?, ?)");
+      const insertVector = this.usesBinaryCoarseVectors
+        ? this.db.prepare("INSERT INTO document_vectors(rowid, embedding, coarse_embedding, release, doc_type, publication, chunk_type, topic_type) VALUES (?, ?, vec_quantize_binary(?), ?, ?, ?, ?, ?)")
+        : this.db.prepare("INSERT INTO document_vectors(rowid, embedding, release, doc_type, publication, chunk_type, topic_type) VALUES (?, ?, ?, ?, ?, ?, ?)");
       const insertSource = this.db.prepare("INSERT INTO sources(release, source_path, blob_sha, content_hash, content) VALUES (?, ?, ?, ?, ?)");
       for (const source of sources) {
         if (source.chunks.length !== source.embeddings.length) throw new Error(`Embedding count mismatch for ${source.path}`);
@@ -313,7 +327,12 @@ export class DocumentationSearchDatabase {
         source.chunks.forEach((chunk, index) => {
           const result = insertDocument.run(chunk.docType, chunk.publication, chunk.sourcePath, chunk.release, chunk.chunkType, chunk.chunkIndex, chunk.title, chunk.heading, chunk.content, chunk.topicType, chunk.product, chunk.classification, chunk.lastUpdated, chunk.objectName, chunk.methodName, storedMetadata(chunk.metadata), chunk.contentHash);
           const id = BigInt(result.lastInsertRowid);
-          insertVector.run(id, vectorBuffer(source.embeddings[index]!), chunk.release, chunk.docType, chunk.publication, chunk.chunkType, chunk.topicType ?? "");
+          const vector = vectorBuffer(source.embeddings[index]!);
+          if (this.usesBinaryCoarseVectors) {
+            insertVector.run(id, vector, vector, chunk.release, chunk.docType, chunk.publication, chunk.chunkType, chunk.topicType ?? "");
+          } else {
+            insertVector.run(id, vector, chunk.release, chunk.docType, chunk.publication, chunk.chunkType, chunk.topicType ?? "");
+          }
         });
         const fallbackContent = source.chunks.find((chunk) => typeof chunk.metadata.full_content === "string")?.metadata.full_content ?? source.chunks.map((chunk) => chunk.content).join("\n\n");
         insertSource.run(release, source.path, source.blobSha, source.contentHash, source.content ?? String(fallbackContent));
@@ -330,12 +349,22 @@ export class DocumentationSearchDatabase {
       .filter((_, index) => mask & (1 << index));
     let statement = this.semanticStatements.get(mask);
     if (!statement) {
-      statement = this.db.prepare(`SELECT d.*, v.distance FROM document_vectors v JOIN documents d ON d.id = v.rowid
-        WHERE v.embedding MATCH ? AND k = ? AND v.release = ?${predicates.length ? ` AND ${predicates.join(" AND ")}` : ""}
-        ORDER BY v.distance LIMIT ?`);
+      statement = this.usesBinaryCoarseVectors
+        ? this.db.prepare(`WITH coarse_matches AS (
+            SELECT v.rowid, v.embedding FROM document_vectors v
+            WHERE v.coarse_embedding MATCH vec_quantize_binary(?) AND v.release = ?${predicates.length ? ` AND ${predicates.join(" AND ")}` : ""}
+            ORDER BY distance LIMIT ?
+          )
+          SELECT d.*, vec_distance_cosine(v.embedding, ?) AS distance FROM coarse_matches v JOIN documents d ON d.id = v.rowid
+          ORDER BY distance LIMIT ?`)
+        : this.db.prepare(`SELECT d.*, v.distance FROM document_vectors v JOIN documents d ON d.id = v.rowid
+          WHERE v.embedding MATCH ? AND k = ? AND v.release = ?${predicates.length ? ` AND ${predicates.join(" AND ")}` : ""}
+          ORDER BY v.distance LIMIT ?`);
       this.semanticStatements.set(mask, statement);
     }
-    return statement.all(vectorBuffer(embedding), candidates, release, ...parameters, candidates) as unknown as SearchRow[];
+    return this.usesBinaryCoarseVectors
+      ? statement.all(vectorBuffer(embedding), release, ...parameters, candidates * this.coarseVectorOversample, vectorBuffer(embedding), candidates) as unknown as SearchRow[]
+      : statement.all(vectorBuffer(embedding), candidates, release, ...parameters, candidates) as unknown as SearchRow[];
   }
 
   search(query: string, embedding: Float32Array, filters: SearchFilters, limit = 10, threshold = 0.3, deduplicateReleases = false, maxResultsPerSource = 3): SearchResult[] {
@@ -359,12 +388,12 @@ export class DocumentationSearchDatabase {
       .slice(0, candidates);
     const keywordExpression = ftsQuery(query);
     this.keywordStatement ??= this.db.prepare(`
-      SELECT d.*, bm25(documents_fts, 10.0, 7.0, 9.0, 9.0, 1.0) AS rank, vec_distance_cosine(v.embedding, ?) AS distance
+      SELECT d.*, rank, vec_distance_cosine(v.embedding, ?) AS distance
       FROM documents_fts f
       JOIN documents d ON d.id = f.rowid
       JOIN document_vectors v ON v.rowid = d.id
       WHERE documents_fts MATCH ?${filtersSql}
-      ORDER BY bm25(documents_fts, 10.0, 7.0, 9.0, 9.0, 1.0) LIMIT ?
+      ORDER BY rank LIMIT ?
     `);
     const keyword = keywordExpression ? this.keywordStatement.all(vectorBuffer(embedding), keywordExpression, ...filtersParameters, candidates) as unknown as SearchRow[] : [];
     const terms = new Set(queryTerms(query));

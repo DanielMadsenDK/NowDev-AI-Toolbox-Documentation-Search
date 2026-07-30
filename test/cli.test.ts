@@ -38,6 +38,7 @@ describe("nowdev-ai-toolbox-documentationsearch CLI", () => {
     ["embedding dimensions", ["--embedding-dimensions", "nope", "status"], "must be an integer"],
     ["embedding endpoint concurrency", ["--embedding-endpoint-concurrency", "0", "status"], "must be between 1 and 32"],
     ["embedding endpoint timeout", ["--embedding-endpoint-timeout", "0", "status"], "must be between 1 and 600"],
+    ["vector oversample", ["--vector-oversample", "0", "status"], "must be between 1 and 64"],
     ["update concurrency", ["update", "--concurrency", "nope"], "concurrency must be an integer"],
     ["update limit", ["update", "--limit", "0"], "limit must be between 1 and 1000000"],
   ])("rejects malformed %s values as JSON", (_name, commandArguments, expected) => {
@@ -52,6 +53,12 @@ describe("nowdev-ai-toolbox-documentationsearch CLI", () => {
     const rows = JSON.parse(result.stdout) as Array<{ similarity: number }>;
     expect(rows).toHaveLength(2);
     expect(rows.every((row) => row.similarity >= 0.99)).toBe(true);
+  });
+
+  it("accepts a precision-first binary vector oversampling setting", () => {
+    const result = runCli(["--json", "--data-dir", dataDirectory, "--deterministic-embeddings", "--vector-oversample", "16", "search", "GlideQuery"]);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).not.toHaveLength(0);
   });
 
   it("supports combined filters and release deduplication", () => {
