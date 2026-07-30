@@ -16,5 +16,8 @@ describe("bundled DocumentationSearch skill", () => {
     expect(content).toContain("search_servicenow_docs");
     expect(content).toContain("failures");
     expect(content).toContain("bge-base-en-v1.5");
+    expect(content).toContain("Treat search results as the default evidence");
+    expect(content).toContain("Do not retrieve a full document merely because a source was selected");
+    expect(content).toContain("Retrieve full content only when the search result and outline cannot safely answer the question");
   });
 });

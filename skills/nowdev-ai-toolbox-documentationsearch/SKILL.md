@@ -96,17 +96,21 @@ If neither MCP tools nor the CLI are accessible, inform the user that Documentat
 
    If the requested release is not indexed, inform the user which releases are available, ask whether to proceed with the closest available release or initialize the requested one, and do not guess at release-specific behavior.
 
-3. Use the selected result's exact `sourcePath` to inspect its structure:
+3. Treat search results as the default evidence. Search returns small ranked chunks so the agent can answer with as little context as possible. If a result directly supports the narrow question, do not fetch the outline or full document. Use the selected result's exact `sourcePath` to inspect its structure only when the result is relevant but incomplete, the answer needs surrounding sections, or the document's scope is unclear:
 
    ```bash
    nowdev-ai-toolbox-documentationsearch --json get "SOURCE_PATH" --family australia --outline
    ```
 
-4. Retrieve full content only for the same source selected in step 3:
+   The outline is a lightweight second check containing headings and previews. Use it to identify the relevant section and stop there when it provides enough context. Do not retrieve a full document merely because a source was selected.
+
+4. Retrieve full content only when the search result and outline cannot safely answer the question. Escalate to the full document when the user asks for a comprehensive explanation, several sections or methods are needed, the result refers to omitted context, sources conflict, or exact procedural order and release caveats must be verified. Retrieve only the same source selected during validation:
 
    ```bash
    nowdev-ai-toolbox-documentationsearch --json get "SOURCE_PATH" --family australia
    ```
+
+   For a narrow API or configuration question, prefer the matching method or section chunk. For a multi-part question, search each part separately and retrieve only the additional source or full document needed for that part. Do not fetch multiple full documents when ranked chunks or an outline establish the answer.
 
 5. Cite or name the source path and release in the answer. Distinguish documented behavior from inference. If no result directly supports the question after refinement, say that the indexed documentation did not establish the answer rather than treating an adjacent result as authoritative.
 
