@@ -5,11 +5,24 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./config.js";
 import { DocumentationSearch } from "./service-context.js";
+import type { SearchResult } from "./types.js";
 
 function result(value: unknown) {
 	return {
 		content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
 	};
+}
+
+type CompactSearchResult = Omit<SearchResult, "metadata" | "contentHash"> & {
+	sourceUrl?: string;
+};
+
+export function formatSearchResults(results: SearchResult[], includeMetadata: boolean): Array<SearchResult | CompactSearchResult> {
+	if (includeMetadata) return results;
+	return results.map(({ metadata, contentHash: _contentHash, ...searchResult }) => {
+		const sourceUrl = typeof metadata.url === "string" ? metadata.url : undefined;
+		return sourceUrl ? { ...searchResult, sourceUrl } : searchResult;
+	});
 }
 
 export async function startMcpServer(dataDirectory?: string): Promise<void> {
@@ -18,7 +31,7 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 
 	server.registerTool("search_servicenow_docs", {
 		title: "Search ServiceNow documentation",
-		description: "Hybrid semantic and keyword search over the local ServiceNow documentation index.",
+		description: "Hybrid semantic and keyword search over the local ServiceNow documentation index. docType filters the indexed source classification, not the ServiceNow topic; leave it unset for procedural questions.",
 		inputSchema: z.object({
 			query: z.string().min(1),
 			limit: z.number().int().min(1).max(50).default(10),
@@ -30,9 +43,10 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 			publication: z.string().optional(),
 			chunkType: z.enum(["overview", "section", "method", "endpoint", "parameter", "returns", "example", "definition"]).optional(),
 			topicType: z.string().optional(),
+			includeMetadata: z.boolean().default(false).describe("Include detailed source metadata such as API parameters and examples. Omit for compact agent-oriented results."),
 		}),
 		annotations: { readOnlyHint: true, idempotentHint: true },
-	}, async ({ query, ...options }) => result(await context.search(query, options)));
+	}, async ({ query, includeMetadata, ...options }) => result(formatSearchResults(await context.search(query, options), includeMetadata)));
 
 	server.registerTool("get_servicenow_document", {
 		title: "Get ServiceNow document",

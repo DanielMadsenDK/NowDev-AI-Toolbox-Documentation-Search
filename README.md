@@ -114,18 +114,20 @@ documentationSearch.close();
 
 ## MCP
 
-Initialize the index before starting an MCP client, then configure the client to launch:
+Initialize the index before starting an MCP client. When the package is installed globally, configure the client to launch its global executable directly:
 
 ```json
 {
   "mcpServers": {
     "nowdev-ai-toolbox-documentationsearch": {
-      "command": "npx",
-      "args": ["-y", "@danielmadsendk/nowdev-ai-toolbox-documentationsearch", "mcp"]
+      "command": "nowdev-ai-toolbox-documentationsearch",
+      "args": ["mcp"]
     }
   }
 }
 ```
+
+This starts one persistent stdio MCP process which remains available until the MCP client shuts it down. The global npm binary directory must be on `PATH`; run `npm prefix -g` to locate it if the client cannot find the command. For an on-demand package launch instead, use `npx -y @danielmadsendk/nowdev-ai-toolbox-documentationsearch mcp`.
 
 Available tools:
 
@@ -135,6 +137,8 @@ Available tools:
 - `list_servicenow_publications`
 - `get_documentation_search_status`
 - `update_servicenow_docs`
+
+`search_servicenow_docs` returns compact hits by default: title, heading, snippet, source path, release, ranking data, and the source URL. Pass `includeMetadata: true` only when API parameters, examples, and other detailed parsed metadata are needed. The `docType` filter is the indexed source classification, so leave it unset for broad or procedural questions; for example, Scripted REST API setup guidance is classified as `developer-guide`, not `rest-api`.
 
 ## AI Skill
 
