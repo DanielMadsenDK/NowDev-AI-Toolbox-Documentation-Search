@@ -191,6 +191,9 @@ describe("ServiceContext", () => {
     expect(second).toMatchObject({ added: 0, changed: 0, chunks: 0 });
     expect(source.downloads).toBe(1);
     expect((await context.search("restore service", { threshold: 0 }))[0]?.sourcePath).toBe("markdown/itsm/incidents.md");
+    const [document] = context.getDocument("markdown/itsm/incidents.md", "australia");
+    expect(document?.content).toContain("## Resolve incidents\nRestore service quickly.");
+    expect(document?.content.length).toBeGreaterThan(document?.metadata.summary?.toString().length ?? 0);
     context.close();
   });
 
@@ -218,11 +221,16 @@ describe("ServiceContext", () => {
     const embeddings = new StreamingEmbeddingProvider(32);
     const context = new DocumentationSearch({ dataDirectory: directory, embeddingProvider: embeddings, source: new TwoDocumentSource() });
     const observedDocuments: number[] = [];
-    embeddings.afterBatch = () => observedDocuments.push(context.status().documents);
+    const observedManifests: unknown[] = [];
+    embeddings.afterBatch = () => {
+      observedDocuments.push(context.status().documents);
+      observedManifests.push(context.status().manifest);
+    };
     const result = await context.update({ family: "australia" });
     expect(result).toMatchObject({ added: 2, chunks: 2, failures: [] });
     expect(embeddings.calls).toBe(1);
     expect(observedDocuments).toEqual([1, 2]);
+    expect(observedManifests.every((manifest) => manifest !== null)).toBe(true);
     context.close();
   });
 

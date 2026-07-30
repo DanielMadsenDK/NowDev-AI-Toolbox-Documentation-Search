@@ -33,16 +33,62 @@ describe("DocumentationSearchDatabase", () => {
     expect(database.getSourceContent("markdown/itsm/incidents.md", "australia")).toContain("Resolve service interruptions");
     const storedMetadata = database.db.prepare("SELECT metadata FROM documents ORDER BY id").all() as Array<{ metadata: string }>;
     expect(storedMetadata.every((row) => !row.metadata.includes("full_content") && !row.metadata.includes("section_content"))).toBe(true);
+    expect(database.db.prepare("SELECT value FROM settings WHERE key = 'database_schema_version'").get()).toEqual({ value: "1" });
     database.close();
   });
 
-  it("applies the cosine threshold to keyword candidates", () => {
+  it("allows keyword candidates below the semantic threshold", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-threshold-"));
     temporaryDirectories.push(directory);
     const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 2);
     const [chunk] = chunkDocument("markdown/itsm/incidents.md", "---\ntitle: Incidents\n---\n# Incidents\nIncident response.", "australia", "australia");
     database.replaceSources("australia", [{ path: chunk!.sourcePath, blobSha: "one", contentHash: chunk!.contentHash, chunks: [chunk!], embeddings: [Float32Array.from([1, 0])] }], []);
-    expect(database.search("incident", Float32Array.from([0, 1]), {}, 10, 0.99)).toEqual([]);
+    expect(database.search("incident", Float32Array.from([0, 1]), {}, 10, 0.99)[0]?.sourcePath).toBe(chunk!.sourcePath);
+    database.close();
+  });
+
+  it("preserves structured API metadata while omitting large body fields", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-metadata-"));
+    temporaryDirectories.push(directory);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 2);
+    const method = chunkDocument("markdown/api-reference/server-api-reference/c_ExampleAPI.md", `# Example
+## Example - run(String value)
+Runs an example.
+|Name|Type|Description|
+|----|----|-----------|
+|value|String|Input value.|
+\`\`\`
+run("value");
+\`\`\``, "australia", "australia").find((chunk) => chunk.chunkType === "method")!;
+    database.replaceSources("australia", [{ path: method.sourcePath, blobSha: "one", contentHash: method.contentHash, chunks: [method], embeddings: [Float32Array.from([1, 0])] }], []);
+    const [stored] = database.getDocument(method.sourcePath, "australia");
+    expect(stored?.metadata.parameters).toEqual(method.metadata.parameters);
+    expect(stored?.metadata.examples).toEqual(method.metadata.examples);
+    expect(stored?.metadata).not.toHaveProperty("full_content");
+    database.close();
+  });
+
+  it("replaces all source vectors and documents as a set", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-replacement-"));
+    temporaryDirectories.push(directory);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 2);
+    const sourcePath = "markdown/guides/replaced.md";
+    const first = chunkDocument(sourcePath, "---\ntitle: First\n---\n# First\nOld content.\n## Old section\nOld detail.", "australia", "australia");
+    const second = chunkDocument(sourcePath, "---\ntitle: Second\n---\n# Second\nNew content.", "australia", "australia");
+    database.replaceSources("australia", [{ path: sourcePath, blobSha: "one", contentHash: first[0]!.contentHash, chunks: first, embeddings: first.map(() => Float32Array.from([1, 0])) }], []);
+    database.replaceSources("australia", [{ path: sourcePath, blobSha: "two", contentHash: second[0]!.contentHash, chunks: second, embeddings: second.map(() => Float32Array.from([0, 1])) }], []);
+    expect(database.getDocument(sourcePath, "australia").map((chunk) => chunk.title)).toEqual(["Second"]);
+    expect(database.stats()).toMatchObject({ documents: 1, chunks: 1 });
+    database.close();
+  });
+
+  it("rejects chunks whose release or source path differs from their source", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-identity-"));
+    temporaryDirectories.push(directory);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 2);
+    const [chunk] = chunkDocument("markdown/guides/example.md", "# Example\nContent.", "australia", "australia");
+    expect(() => database.replaceSources("zurich", [{ path: chunk!.sourcePath, blobSha: "one", contentHash: chunk!.contentHash, chunks: [chunk!], embeddings: [Float32Array.from([1, 0])] }], [])).toThrow("identity mismatch");
+    expect(database.stats()).toMatchObject({ documents: 0, chunks: 0 });
     database.close();
   });
 

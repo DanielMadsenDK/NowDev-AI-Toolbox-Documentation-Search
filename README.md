@@ -64,7 +64,26 @@ Use `--embedding-batch-size 16` to trade more GPU memory for throughput when the
 
 CPU inference (including after a DirectML fallback) uses the host's full logical core count for ONNX Runtime's intra-op thread pool by default. Override this with `--embedding-threads <count>` on machines where using every core isn't appropriate, such as a shared server or a container with a CPU limit lower than the host's core count.
 
-Search `--limit` accepts integers from 1 to 50. `--threshold` is the minimum cosine similarity and accepts values from -1 to 1; exact API object or method keyword matches are retained below that threshold so queries such as `set workflow` can resolve `setWorkflow`. Results use hybrid reciprocal-rank fusion, weighted FTS5 title and heading matches, exact API object/method boosts, and query-aware chunk-type weighting. Results are limited to three chunks per source by default; adjust this with `--max-per-source` or use `--max-per-source 1` for more diverse results. Use `--deduplicate-releases` to retain only the highest-ranked release of each source path and chunk index when searching across multiple releases.
+### Remote document embedding
+
+Document embedding during `init` or `update` can be offloaded to an OpenAI-compatible embeddings endpoint such as OpenRouter. The API key is read from an environment variable; it is never accepted as a CLI value, written to the index, or included in status output.
+
+```powershell
+$env:OPENROUTER_API_KEY = "<your key>"
+nowdev-ai-toolbox-documentationsearch `
+  --embedding-profile bge-base-en-v1.5 `
+  --embedding-endpoint https://openrouter.ai/api/v1/embeddings `
+  --embedding-endpoint-model baai/bge-base-en-v1.5 `
+  init --family australia
+```
+
+Use `--embedding-api-key-env <name>` to read the key from a different environment variable. Each request contains up to 64 texts, and four requests run concurrently by default. Tune these independently with `--embedding-endpoint-batch-size <count>` and `--embedding-endpoint-concurrency <count>`. Higher concurrency can improve throughput when the endpoint has spare capacity, but can trigger provider throttling or upstream stalls; use 4 unless the endpoint is known to handle more. Requests time out after 30 seconds and retry transient failures; override this with `--embedding-endpoint-timeout <seconds>`. The endpoint URL must use HTTPS, except for local `http://localhost` services, and cannot contain credentials or query parameters.
+
+Remote tokenizers can occasionally count a token-dense passage above the model limit even when it fits the profile's character cap. A context-limit response causes the client to isolate that passage, shorten it with headroom, and retry it automatically instead of skipping the document.
+
+Only document batches are sent to the endpoint. Query embeddings continue to use the selected local profile, so later `search` and MCP lookups work fully offline and do not need the endpoint flags or API key. The endpoint model must produce the same embedding space, dimensions, prefixes, and normalization behavior as the selected local profile. For example, OpenRouter's `baai/bge-base-en-v1.5` corresponds to the local `bge-base-en-v1.5` profile. Mixing merely same-sized but different models produces invalid semantic scores and requires rebuilding the index.
+
+Search `--limit` accepts integers from 1 to 50. `--threshold` is the minimum cosine similarity for semantic candidates and accepts values from -1 to 1; lexical FTS5 candidates remain eligible independently, so exact terms and API identifiers are not lost when their vector similarity is low. Results use hybrid reciprocal-rank fusion, weighted FTS5 title and heading matches, exact API object/method boosts, and query-aware chunk-type weighting. Results are limited to three chunks per source by default; adjust this with `--max-per-source` or use `--max-per-source 1` for more diverse results. Use `--deduplicate-releases` to retain only the highest-ranked release of each source path and chunk index when searching across multiple releases. Unrestricted semantic search divides its candidate budget across indexed releases; filtering by family searches that release directly and is preferable when the target family is known.
 
 The current index schema stores API object and method names as dedicated FTS5 fields, partitions the vector index by release, and stores document type, publication, chunk type, and topic type as sqlite-vec metadata so supplied equality filters are applied before nearest-neighbor candidates are selected. Topic and API chunks are prepared at paragraph or code-line boundaries under the active profile's input budget. Existing indexes from earlier schema versions must be removed and rebuilt:
 
@@ -91,7 +110,7 @@ const results = await documentationSearch.search("GlideRecord pagination", {
 documentationSearch.close();
 ```
 
-`DocumentationSearch` accepts a custom `EmbeddingProvider`, allowing hosted or organization-specific models without changing storage or ranking. Changing embedding dimensions requires a separate data directory or rebuilding the index.
+`DocumentationSearch` accepts a custom `EmbeddingProvider`, allowing hosted or organization-specific models without changing storage or ranking. It also accepts `embeddingEndpoint`, `embeddingEndpointModel`, and `embeddingEndpointApiKey` options to offload document embedding while retaining local query embedding. Changing embedding dimensions requires a separate data directory or rebuilding the index.
 
 ## MCP
 

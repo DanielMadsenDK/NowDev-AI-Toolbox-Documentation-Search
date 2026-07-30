@@ -16,9 +16,20 @@ export interface EmbeddingProvider {
   readonly queryPrefix?: string;
   readonly maxEmbeddingCharacters?: number;
   readonly activeDevice?: EmbeddingDevice;
+  readonly endpointModel?: string;
+  readonly endpointConcurrency?: number;
+  readonly metrics?: EmbeddingMetrics;
   embed(texts: string[], onProgress?: (completed: number, total: number) => void): Promise<Float32Array[]>;
   embedBatched?(texts: string[], onBatch: (batch: EmbeddingBatch) => void | Promise<void>, onProgress?: (completed: number, total: number) => void): Promise<void>;
   embedQuery?(query: string): Promise<Float32Array>;
+}
+
+export interface EmbeddingMetrics {
+  requests: number;
+  retries: number;
+  truncations: number;
+  batchSplits: number;
+  deviceTransitions: number;
 }
 
 export interface EmbeddingBatch {
@@ -46,6 +57,16 @@ export interface TransformersEmbeddingOptions {
   threads?: number;
 }
 
+export interface EndpointEmbeddingOptions {
+  endpoint: string;
+  apiKey: string;
+  model: string;
+  batchSize?: number;
+  concurrency?: number;
+  timeoutMilliseconds?: number;
+  fetch?: typeof globalThis.fetch;
+}
+
 interface IndexedText {
   index: number;
   text: string;
@@ -62,12 +83,19 @@ function isDeviceLostError(error: unknown): boolean {
 }
 
 function estimateTokenCount(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
+  return Math.max(1, Math.ceil(Buffer.byteLength(text, "utf8") / 2));
+}
+
+function assertNonEmptyTexts(texts: string[]): void {
+  const emptyIndex = texts.findIndex((text) => !text.trim());
+  if (emptyIndex !== -1) throw new Error(`Embedding input at index ${emptyIndex} is empty`);
 }
 
 export function truncateEmbeddingText(text: string, maxCharacters: number): string {
   if (!Number.isFinite(maxCharacters) || maxCharacters <= 0 || text.length <= maxCharacters) return text;
-  return text.slice(0, Math.floor(maxCharacters));
+  let end = Math.floor(maxCharacters);
+  if (end > 0 && /[\uD800-\uDBFF]/.test(text[end - 1]!)) end -= 1;
+  return text.slice(0, end);
 }
 
 export function createEmbeddingBatches(texts: string[], batchSize: number, sortByLength = true, maxBatchTokens = Number.POSITIVE_INFINITY): IndexedText[][] {
@@ -78,6 +106,9 @@ export function createEmbeddingBatches(texts: string[], batchSize: number, sortB
   let currentTokens = 0;
   for (const item of indexed) {
     const itemTokens = estimateTokenCount(item.text);
+    if (itemTokens > maxBatchTokens) {
+      throw new Error(`Embedding input at index ${item.index} exceeds the configured batch token budget (${itemTokens} > ${maxBatchTokens})`);
+    }
     if (current.length && (current.length >= batchSize || currentTokens + itemTokens > maxBatchTokens)) {
       batches.push(current);
       current = [];
@@ -104,6 +135,7 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
   readonly maxBatchTokens: number;
   readonly maxEmbeddingCharacters: number;
   readonly threads: number;
+  readonly metrics: EmbeddingMetrics = { requests: 0, retries: 0, truncations: 0, batchSplits: 0, deviceTransitions: 0 };
   private readonly options: TransformersEmbeddingOptions;
   private pipeline?: Promise<FeatureExtractionPipeline>;
   private layerNormOperation?: typeof import("@huggingface/transformers").layer_norm;
@@ -128,7 +160,10 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
     this.maxBatchTokens = Number.isFinite(maxBatchTokens) && maxBatchTokens > 0 ? Math.floor(maxBatchTokens) : Number.POSITIVE_INFINITY;
     const maxEmbeddingCharacters = options.maxEmbeddingCharacters ?? DEFAULT_MAX_EMBEDDING_CHARACTERS;
     this.maxEmbeddingCharacters = Number.isFinite(maxEmbeddingCharacters) && maxEmbeddingCharacters > 0 ? Math.floor(maxEmbeddingCharacters) : Number.POSITIVE_INFINITY;
-    this.threads = Math.max(1, Math.floor(options.threads ?? os.cpus().length));
+    if (Number.isFinite(this.maxEmbeddingCharacters) && this.maxEmbeddingCharacters <= Math.max(this.documentPrefix.length, this.queryPrefix.length)) {
+      throw new Error("maxEmbeddingCharacters must exceed the configured embedding prefix length");
+    }
+    this.threads = Math.max(1, Math.floor(options.threads ?? os.availableParallelism()));
     this.runtimeDevice = this.device;
   }
 
@@ -137,14 +172,19 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
   }
 
   private async load(): Promise<FeatureExtractionPipeline> {
-    if (this.pipeline) return this.pipeline;
-    this.pipeline = import("@huggingface/transformers").then(async (transformers) => {
-      if (this.options.cacheDirectory) transformers.env.cacheDir = this.options.cacheDirectory;
-      this.layerNormOperation = transformers.layer_norm;
-      // onnxruntime-node's default intra-op thread count isn't always the full logical core count; on a low-core machine that leaves real CPU throughput on the table for a compute-bound embedding pass. Configurable (this.threads) since host core counts vary.
-      const sessionOptions = this.runtimeDevice === "cpu" ? { intraOpNumThreads: this.threads } : undefined;
-      return transformers.pipeline("feature-extraction", this.model, { device: this.runtimeDevice, dtype: this.dtype, session_options: sessionOptions });
-    });
+    if (!this.pipeline) {
+      const loading = import("@huggingface/transformers").then(async (transformers) => {
+        if (this.options.cacheDirectory) transformers.env.cacheDir = this.options.cacheDirectory;
+        this.layerNormOperation = transformers.layer_norm;
+        // onnxruntime-node's default intra-op thread count isn't always the full logical core count; on a low-core machine that leaves real CPU throughput on the table for a compute-bound embedding pass. Configurable (this.threads) since host core counts vary.
+        const sessionOptions = this.runtimeDevice === "cpu" ? { intraOpNumThreads: this.threads } : undefined;
+        return transformers.pipeline("feature-extraction", this.model, { device: this.runtimeDevice, dtype: this.dtype, session_options: sessionOptions });
+      });
+      this.pipeline = loading;
+      void loading.catch(() => {
+        if (this.pipeline === loading) this.pipeline = undefined;
+      });
+    }
     return this.pipeline;
   }
 
@@ -153,6 +193,7 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
     const currentPipeline = this.pipeline;
     this.pipeline = undefined;
     this.runtimeDevice = "cpu";
+    this.metrics.deviceTransitions += 1;
     if (currentPipeline) {
       try {
         await (await currentPipeline).dispose();
@@ -191,9 +232,15 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
 
   private async embedPrefixed(texts: string[], prefix: string, onProgress?: (completed: number, total: number) => void, onBatch?: (batch: EmbeddingBatch) => void | Promise<void>, priority = false): Promise<Float32Array[]> {
     if (!texts.length) return [];
+    assertNonEmptyTexts(texts);
     const vectors = onBatch ? undefined : new Array<Float32Array>(texts.length);
     let completed = 0;
-    const prefixedTexts = texts.map((text) => truncateEmbeddingText(`${prefix}${text}`, this.maxEmbeddingCharacters));
+    const prefixedTexts = texts.map((text) => {
+      const value = `${prefix}${text}`;
+      const truncated = truncateEmbeddingText(value, this.maxEmbeddingCharacters);
+      if (truncated.length < value.length) this.metrics.truncations += 1;
+      return truncated;
+    });
     const processBatch = async (batch: IndexedText[]): Promise<void> => {
       const extractor = await this.load();
       try {
@@ -223,7 +270,13 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
           await processBatch(batch);
           return;
         }
+        if (isOutOfMemoryError(error) && batch.length === 1 && this.runtimeDevice !== "cpu") {
+          await this.useCpuFallback();
+          await processBatch(batch);
+          return;
+        }
         if (!isOutOfMemoryError(error) || batch.length <= 1) throw error;
+        this.metrics.batchSplits += 1;
         const midpoint = Math.ceil(batch.length / 2);
         await processBatch(batch.slice(0, midpoint));
         await processBatch(batch.slice(midpoint));
@@ -249,6 +302,222 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
   }
 }
 
+interface EndpointEmbeddingResponse {
+  data?: Array<{ embedding?: number[]; index?: number }>;
+  error?: { message?: string };
+}
+
+class EndpointEmbeddingError extends Error {
+  constructor(readonly status: number, message: string, readonly retryAfterMilliseconds?: number) {
+    super(message);
+  }
+}
+
+function isTransientEndpointError(error: unknown): boolean {
+  return error instanceof EndpointEmbeddingError && (error.status === 0 || error.status === 408 || error.status === 429 || error.status >= 500);
+}
+
+function retryDelay(error: unknown, attempt: number): number {
+  if (error instanceof EndpointEmbeddingError && error.retryAfterMilliseconds !== undefined) return error.retryAfterMilliseconds;
+  return 1000 * 2 ** attempt;
+}
+
+function isEndpointContextLimitError(error: unknown): error is EndpointEmbeddingError {
+  return error instanceof EndpointEmbeddingError
+    && error.status === 400
+    && /context length|maximum input length|input_tokens/i.test(error.message);
+}
+
+export class EndpointDocumentEmbeddingProvider implements EmbeddingProvider {
+  readonly name: string;
+  readonly model: string;
+  readonly dimensions: number;
+  readonly device?: EmbeddingDevice;
+  readonly dtype?: string;
+  readonly pooling?: "mean" | "cls";
+  readonly layerNorm?: boolean;
+  readonly documentPrefix: string;
+  readonly queryPrefix?: string;
+  readonly maxEmbeddingCharacters?: number;
+  readonly endpointModel: string;
+  readonly batchSize: number;
+  readonly endpointConcurrency: number;
+  readonly timeoutMilliseconds: number;
+  readonly endpoint: string;
+  readonly metrics: EmbeddingMetrics = { requests: 0, retries: 0, truncations: 0, batchSplits: 0, deviceTransitions: 0 };
+  private readonly apiKey: string;
+  private readonly fetchImplementation: typeof globalThis.fetch;
+
+  constructor(private readonly queryProvider: EmbeddingProvider, options: EndpointEmbeddingOptions) {
+    const endpoint = new URL(options.endpoint);
+    if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
+      throw new Error("Embedding endpoint must not contain credentials, query parameters, or a fragment");
+    }
+    if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(endpoint.hostname))) {
+      throw new Error("Embedding endpoint must use HTTPS unless it targets localhost");
+    }
+    if (!options.apiKey.trim()) throw new Error("Embedding endpoint API key is empty");
+    if (!options.model.trim()) throw new Error("Embedding endpoint model is empty");
+    this.name = queryProvider.name;
+    this.model = queryProvider.model;
+    this.dimensions = queryProvider.dimensions;
+    this.device = queryProvider.device;
+    this.dtype = queryProvider.dtype;
+    this.pooling = queryProvider.pooling;
+    this.layerNorm = queryProvider.layerNorm;
+    this.documentPrefix = queryProvider.documentPrefix ?? "";
+    this.queryPrefix = queryProvider.queryPrefix;
+    this.maxEmbeddingCharacters = queryProvider.maxEmbeddingCharacters;
+    this.endpoint = endpoint.toString();
+    this.apiKey = options.apiKey;
+    this.endpointModel = options.model;
+    this.batchSize = Math.max(1, Math.floor(options.batchSize ?? 64));
+    this.endpointConcurrency = Math.max(1, Math.floor(options.concurrency ?? 4));
+    this.timeoutMilliseconds = Math.max(1000, Math.floor(options.timeoutMilliseconds ?? 30_000));
+    this.fetchImplementation = options.fetch ?? globalThis.fetch;
+    if (Number.isFinite(this.maxEmbeddingCharacters) && this.maxEmbeddingCharacters! <= this.documentPrefix.length) {
+      throw new Error("maxEmbeddingCharacters must exceed the configured document prefix length");
+    }
+  }
+
+  get activeDevice(): EmbeddingDevice | undefined {
+    return this.queryProvider.activeDevice;
+  }
+
+  private async request(texts: string[]): Promise<Float32Array[]> {
+    this.metrics.requests += 1;
+    let response: Response;
+    try {
+      response = await this.fetchImplementation(this.endpoint, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.apiKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: this.endpointModel,
+          input: texts.map((text) => truncateEmbeddingText(`${this.documentPrefix}${text}`, this.maxEmbeddingCharacters ?? Number.POSITIVE_INFINITY)),
+          encoding_format: "float",
+        }),
+        signal: AbortSignal.timeout(this.timeoutMilliseconds),
+      });
+    } catch (error) {
+      throw new EndpointEmbeddingError(0, `Embedding endpoint request failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    let payload: EndpointEmbeddingResponse;
+    try {
+      payload = await response.json() as EndpointEmbeddingResponse;
+    } catch {
+      throw new Error(`Embedding endpoint returned HTTP ${response.status} with an invalid JSON response`);
+    }
+    if (!response.ok) {
+      const retryAfter = response.headers.get("retry-after");
+      const retryAfterMilliseconds = retryAfter && /^\d+(?:\.\d+)?$/.test(retryAfter) ? Number(retryAfter) * 1000 : undefined;
+      throw new EndpointEmbeddingError(response.status, `Embedding endpoint returned HTTP ${response.status}${payload.error?.message ? `: ${payload.error.message}` : ""}`, retryAfterMilliseconds);
+    }
+    if (!Array.isArray(payload.data) || payload.data.length !== texts.length) {
+      throw new Error(`Embedding endpoint returned ${payload.data?.length ?? 0} vectors for ${texts.length} inputs`);
+    }
+    const indexedCount = payload.data.filter((item) => item.index !== undefined).length;
+    if (indexedCount !== 0 && indexedCount !== payload.data.length) throw new Error("Embedding endpoint returned a mixture of indexed and unindexed vectors");
+    let ordered = payload.data;
+    if (indexedCount) {
+      const indexes = payload.data.map((item) => item.index!);
+      if (indexes.some((index) => !Number.isInteger(index) || index < 0 || index >= texts.length) || new Set(indexes).size !== texts.length) {
+        throw new Error(`Embedding endpoint returned invalid vector indexes; expected a unique permutation of 0..${texts.length - 1}`);
+      }
+      ordered = [...payload.data].sort((left, right) => left.index! - right.index!);
+    }
+    return ordered.map((item) => {
+      if (!Array.isArray(item.embedding) || item.embedding.length < this.dimensions) {
+        throw new Error(`Embedding endpoint model ${this.endpointModel} returned ${item.embedding?.length ?? 0} dimensions; expected at least ${this.dimensions}`);
+      }
+      const vector = Float32Array.from(item.embedding.slice(0, this.dimensions));
+      const norm = Math.sqrt(vector.reduce((total, value) => total + value * value, 0));
+      if (!Number.isFinite(norm) || norm === 0) throw new Error(`Embedding endpoint model ${this.endpointModel} returned an invalid vector`);
+      return vector.map((value) => value / norm);
+    });
+  }
+
+  private async requestWithTransientRetry(texts: string[]): Promise<Float32Array[]> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.request(texts);
+      } catch (error) {
+        const maximumRetries = error instanceof EndpointEmbeddingError && error.status === 0 ? 1 : 2;
+        if (attempt >= maximumRetries || !isTransientEndpointError(error)) throw error;
+        this.metrics.retries += 1;
+        await new Promise((resolve) => setTimeout(resolve, retryDelay(error, attempt)));
+      }
+    }
+  }
+
+  private async requestWithContextLimitRetry(texts: string[], reductions = 0): Promise<Float32Array[]> {
+    try {
+      return await this.requestWithTransientRetry(texts);
+    } catch (error) {
+      if (!isEndpointContextLimitError(error)) throw error;
+      if (texts.length > 1) {
+        this.metrics.batchSplits += 1;
+        const midpoint = Math.ceil(texts.length / 2);
+        const left = await this.requestWithContextLimitRetry(texts.slice(0, midpoint), reductions);
+        const right = await this.requestWithContextLimitRetry(texts.slice(midpoint), reductions);
+        return [...left, ...right];
+      }
+      if (reductions >= 8) throw new Error("Embedding endpoint still rejected an input after 8 context-limit reductions", { cause: error });
+      const text = texts[0]!;
+      const currentLength = this.documentPrefix.length + text.length;
+      const tokenCounts = error.message.match(/passed\s+(\d+)\s+input tokens[\s\S]*?context length is only\s+(\d+)\s+tokens/i);
+      const ratio = tokenCounts ? (Number(tokenCounts[2]) - 8) / Number(tokenCounts[1]) : 0.5;
+      const shortenedLength = Math.floor(currentLength * Math.min(0.9, Math.max(0.1, ratio))) - this.documentPrefix.length;
+      if (shortenedLength < 1 || shortenedLength >= text.length) throw error;
+      this.metrics.truncations += 1;
+      return this.requestWithContextLimitRetry([truncateEmbeddingText(text, shortenedLength)], reductions + 1);
+    }
+  }
+
+  async embed(texts: string[], onProgress?: (completed: number, total: number) => void): Promise<Float32Array[]> {
+    const vectors: Float32Array[] = [];
+    await this.embedBatched(texts, (batch) => {
+      batch.indexes.forEach((index, batchIndex) => { vectors[index] = batch.vectors[batchIndex]!; });
+    }, onProgress);
+    return vectors;
+  }
+
+  async embedBatched(texts: string[], onBatch: (batch: EmbeddingBatch) => void | Promise<void>, onProgress?: (completed: number, total: number) => void): Promise<void> {
+    if (!texts.length) return;
+    assertNonEmptyTexts(texts);
+    if (Number.isFinite(this.maxEmbeddingCharacters)) {
+      this.metrics.truncations += texts.filter((text) => this.documentPrefix.length + text.length > this.maxEmbeddingCharacters!).length;
+    }
+    let completed = 0;
+    let nextOffset = 0;
+    const worker = async (): Promise<void> => {
+      while (nextOffset < texts.length) {
+        const offset = nextOffset;
+        nextOffset += this.batchSize;
+        const input = texts.slice(offset, offset + this.batchSize);
+        const vectors = await this.requestWithContextLimitRetry(input);
+        completed += input.length;
+        await onBatch({ indexes: input.map((_, index) => offset + index), vectors, completed, total: texts.length });
+        onProgress?.(completed, texts.length);
+      }
+    };
+    const results = await Promise.allSettled(Array.from({ length: Math.min(this.endpointConcurrency, Math.ceil(texts.length / this.batchSize)) }, worker));
+    const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failures.length) {
+      const firstFailure = failures[0]!.reason;
+      const detail = firstFailure instanceof Error ? firstFailure.message : String(firstFailure);
+      throw new AggregateError(failures.map((failure) => failure.reason), `${failures.length} embedding endpoint worker${failures.length === 1 ? "" : "s"} failed: ${detail}`, { cause: firstFailure });
+    }
+  }
+
+  async embedQuery(query: string): Promise<Float32Array> {
+    if (this.queryProvider.embedQuery) return this.queryProvider.embedQuery(query);
+    return (await this.queryProvider.embed([query]))[0]!;
+  }
+}
+
 export class HashEmbeddingProvider implements EmbeddingProvider {
   readonly name = "deterministic-hash";
   readonly model = "deterministic-hash-v1";
@@ -258,6 +527,7 @@ export class HashEmbeddingProvider implements EmbeddingProvider {
   constructor(readonly dimensions = 64) {}
 
   async embed(texts: string[], onProgress?: (completed: number, total: number) => void): Promise<Float32Array[]> {
+    assertNonEmptyTexts(texts);
     const vectors = texts.map((value) => {
       const vector = new Float32Array(this.dimensions);
       const tokens = value.toLowerCase().match(/[a-z0-9_]+/g) ?? [];

@@ -36,6 +36,8 @@ describe("nowdev-ai-toolbox-documentationsearch CLI", () => {
     ["search threshold", ["search", "GlideQuery", "--threshold", "nope"], "threshold must be a finite number"],
     ["embedding profile", ["--embedding-profile", "unsupported", "status"], "Allowed choices"],
     ["embedding dimensions", ["--embedding-dimensions", "nope", "status"], "must be an integer"],
+    ["embedding endpoint concurrency", ["--embedding-endpoint-concurrency", "0", "status"], "must be between 1 and 32"],
+    ["embedding endpoint timeout", ["--embedding-endpoint-timeout", "0", "status"], "must be between 1 and 600"],
     ["update concurrency", ["update", "--concurrency", "nope"], "concurrency must be an integer"],
     ["update limit", ["update", "--limit", "0"], "limit must be between 1 and 1000000"],
   ])("rejects malformed %s values as JSON", (_name, commandArguments, expected) => {
@@ -68,5 +70,23 @@ describe("nowdev-ai-toolbox-documentationsearch CLI", () => {
     const result = runCli(["--json", "--data-dir", dataDirectory, "status"]);
     expect(result.status).toBe(1);
     expect(JSON.parse(result.stderr)).toMatchObject({ error: expect.stringContaining("provider uses 384") });
+  });
+
+  it("requires endpoint URL and model together", () => {
+    const result = runCli(["--json", "--data-dir", dataDirectory, "--embedding-endpoint", "https://openrouter.ai/api/v1/embeddings", "status"]);
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr)).toMatchObject({ error: expect.stringContaining("must be specified together") });
+  });
+
+  it("reads endpoint credentials only from the configured environment variable", () => {
+    const result = runCli([
+      "--json", "--data-dir", dataDirectory,
+      "--embedding-endpoint", "https://openrouter.ai/api/v1/embeddings",
+      "--embedding-endpoint-model", "baai/bge-base-en-v1.5",
+      "--embedding-api-key-env", "MISSING_EMBEDDING_TEST_KEY",
+      "status",
+    ]);
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stderr)).toMatchObject({ error: expect.stringContaining("MISSING_EMBEDDING_TEST_KEY is not set") });
   });
 });

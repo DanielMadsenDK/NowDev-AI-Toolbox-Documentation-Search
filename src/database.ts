@@ -69,7 +69,7 @@ function scalarRows<T>(rows: Record<string, unknown>[]): T[] {
   return rows.map((row) => Object.values(row)[0] as T);
 }
 
-const OMITTED_METADATA_KEYS = new Set(["full_content", "section_content", "parameters", "returns", "examples"]);
+const OMITTED_METADATA_KEYS = new Set(["full_content", "section_content"]);
 
 function storedMetadata(metadata: Record<string, unknown>): string {
   return JSON.stringify(Object.fromEntries(Object.entries(metadata).filter(([key]) => !OMITTED_METADATA_KEYS.has(key))));
@@ -90,7 +90,7 @@ function queryTerms(query: string): string[] {
 
 function looksLikeApiQuery(query: string): boolean {
   return /\b(?:glide[a-z0-9_]*|sn_[a-z0-9_]+|api|method|parameter|argument|endpoint|script)\b/i.test(query)
-    || /[A-Z_][A-Za-z0-9_]*/.test(query);
+    || /\b(?:[a-z]+[A-Z][A-Za-z0-9_]*|[A-Z]{2,}[A-Za-z0-9_]*|[A-Za-z0-9]+_[A-Za-z0-9_]+)\b/.test(query);
 }
 
 function identifierTerms(identifier: string | null): string[] {
@@ -193,6 +193,7 @@ export class DocumentationSearchDatabase {
         method_name TEXT, metadata TEXT NOT NULL, content_hash TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(release, source_path);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_source_chunk ON documents(release, source_path, chunk_index);
       CREATE INDEX IF NOT EXISTS idx_documents_object_method ON documents(object_name, method_name);
       CREATE INDEX IF NOT EXISTS idx_documents_filters ON documents(release, doc_type, publication, chunk_type, topic_type);
       CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
@@ -247,6 +248,12 @@ export class DocumentationSearchDatabase {
     if (!["doc_type", "publication", "chunk_type", "topic_type"].every((column) => vectorSchema.includes(column))) {
       throw new Error("Index predates metadata-filtered vector search. Run reset-index --yes and re-index the documentation.");
     }
+    const databaseSchemaVersion = 1;
+    const storedSchemaVersion = scalar<string>(this.db.prepare("SELECT value FROM settings WHERE key = 'database_schema_version'").get());
+    if (storedSchemaVersion && Number(storedSchemaVersion) !== databaseSchemaVersion) {
+      throw new Error(`Index uses database schema ${storedSchemaVersion}, but this version requires ${databaseSchemaVersion}. Run reset-index --yes and re-index the documentation.`);
+    }
+    this.db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('database_schema_version', ?)").run(String(databaseSchemaVersion));
   }
 
   close(): void {
@@ -278,19 +285,17 @@ export class DocumentationSearchDatabase {
     return new Map(rows.map((row) => [row.source_path, { blobSha: row.blob_sha, contentHash: row.content_hash }]));
   }
 
-  replaceSources(release: string, sources: Array<{ path: string; blobSha: string; contentHash: string; content?: string; chunks: DocumentChunk[]; embeddings: Float32Array[] }>, deletedPaths: string[]): void {
+  replaceSources(release: string, sources: Array<{ path: string; blobSha: string; contentHash: string; content?: string; chunks: DocumentChunk[]; embeddings: Float32Array[] }>, deletedPaths: string[], manifest?: IndexManifest): void {
     const remove = (sourcePaths: string[]) => {
-      const ids = this.db.prepare("SELECT id FROM documents WHERE release = ? AND source_path = ?");
-      const deleteVector = this.db.prepare("DELETE FROM document_vectors WHERE rowid = ?");
-      const deleteDocs = this.db.prepare("DELETE FROM documents WHERE release = ? AND source_path = ?");
-      const deleteSource = this.db.prepare("DELETE FROM sources WHERE release = ? AND source_path = ?");
-      for (const sourcePath of sourcePaths) {
-        for (const row of ids.all(release, sourcePath) as Array<{ id: number }>) {
-          deleteVector.run(row.id);
-        }
-        deleteDocs.run(release, sourcePath);
-        deleteSource.run(release, sourcePath);
-      }
+      if (!sourcePaths.length) return;
+      this.db.exec("CREATE TEMP TABLE IF NOT EXISTS affected_sources(source_path TEXT PRIMARY KEY); DELETE FROM affected_sources;");
+      const insertAffected = this.db.prepare("INSERT OR IGNORE INTO affected_sources(source_path) VALUES (?)");
+      sourcePaths.forEach((sourcePath) => insertAffected.run(sourcePath));
+      this.db.exec("CREATE TEMP TABLE IF NOT EXISTS affected_document_ids(id INTEGER PRIMARY KEY); DELETE FROM affected_document_ids;");
+      this.db.prepare("INSERT INTO affected_document_ids SELECT id FROM documents WHERE release = ? AND source_path IN (SELECT source_path FROM affected_sources)").run(release);
+      this.db.exec("DELETE FROM document_vectors WHERE rowid IN (SELECT id FROM affected_document_ids)");
+      this.db.prepare("DELETE FROM documents WHERE release = ? AND source_path IN (SELECT source_path FROM affected_sources)").run(release);
+      this.db.prepare("DELETE FROM sources WHERE release = ? AND source_path IN (SELECT source_path FROM affected_sources)").run(release);
     };
     this.transaction(() => {
       remove([...deletedPaths, ...sources.map((source) => source.path)]);
@@ -302,6 +307,9 @@ export class DocumentationSearchDatabase {
       const insertSource = this.db.prepare("INSERT INTO sources(release, source_path, blob_sha, content_hash, content) VALUES (?, ?, ?, ?, ?)");
       for (const source of sources) {
         if (source.chunks.length !== source.embeddings.length) throw new Error(`Embedding count mismatch for ${source.path}`);
+        if (source.chunks.some((chunk) => chunk.release !== release || chunk.sourcePath !== source.path)) {
+          throw new Error(`Chunk source identity mismatch for ${source.path}`);
+        }
         source.chunks.forEach((chunk, index) => {
           const result = insertDocument.run(chunk.docType, chunk.publication, chunk.sourcePath, chunk.release, chunk.chunkType, chunk.chunkIndex, chunk.title, chunk.heading, chunk.content, chunk.topicType, chunk.product, chunk.classification, chunk.lastUpdated, chunk.objectName, chunk.methodName, storedMetadata(chunk.metadata), chunk.contentHash);
           const id = BigInt(result.lastInsertRowid);
@@ -310,6 +318,7 @@ export class DocumentationSearchDatabase {
         const fallbackContent = source.chunks.find((chunk) => typeof chunk.metadata.full_content === "string")?.metadata.full_content ?? source.chunks.map((chunk) => chunk.content).join("\n\n");
         insertSource.run(release, source.path, source.blobSha, source.contentHash, source.content ?? String(fallbackContent));
       }
+      if (manifest) this.db.prepare("INSERT INTO settings(key, value) VALUES ('manifest', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(manifest));
     });
   }
 
@@ -343,8 +352,9 @@ export class DocumentationSearchDatabase {
     const releases = filters.release
       ? [filters.release.toLowerCase()]
       : scalarRows<string>(this.db.prepare("SELECT DISTINCT release FROM documents ORDER BY release").all());
+    const candidatesPerRelease = filters.release ? candidates : Math.max(1, Math.ceil(candidates / Math.max(releases.length, 1)));
     const semantic = releases
-      .flatMap((release) => this.semanticSearch(embedding, candidates, release, filters))
+      .flatMap((release) => this.semanticSearch(embedding, candidatesPerRelease, release, filters))
       .sort((left, right) => (left.distance ?? 1) - (right.distance ?? 1))
       .slice(0, candidates);
     const keywordExpression = ftsQuery(query);
@@ -367,7 +377,6 @@ export class DocumentationSearchDatabase {
     });
     keyword.forEach((row, index) => {
       const similarity = 1 - (row.distance ?? 1);
-      if (similarity < threshold && identifierBoost(row, terms) === 1) return;
       const current = scores.get(row.id);
       scores.set(row.id, { row, score: (current?.score ?? 0) + keywordWeight / (60 + index + 1), similarity: current?.similarity ?? similarity });
     });

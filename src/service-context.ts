@@ -2,7 +2,7 @@ import { chunkDocument, contentHash } from "./chunker.js";
 import { DEFAULT_FAMILY, DEFAULT_MAX_EMBEDDING_CHARACTERS, resolvePaths, SEARCH_SCHEMA_VERSION, type DocumentationSearchPaths } from "./config.js";
 import { DocumentationSearchDatabase, readStoredDimensions, readStoredEmbeddingProfile } from "./database.js";
 import { DEFAULT_EMBEDDING_PROFILE, embeddingProfile, isEmbeddingProfileName, type EmbeddingProfileName } from "./embedding-profiles.js";
-import { TransformersEmbeddingProvider, type EmbeddingBatch, type EmbeddingDevice, type EmbeddingProvider, type TransformersEmbeddingOptions } from "./embedder.js";
+import { EndpointDocumentEmbeddingProvider, TransformersEmbeddingProvider, type EmbeddingBatch, type EmbeddingDevice, type EmbeddingProvider, type TransformersEmbeddingOptions } from "./embedder.js";
 import { GitHubDocumentationSource, type DocumentationArea, type SourceEntry } from "./github.js";
 import type { DocumentChunk, IndexFailure, IndexManifest, SearchOptions, SearchResult, UpdateResult } from "./types.js";
 
@@ -15,6 +15,12 @@ export interface DocumentationSearchOptions {
   embeddingThreads?: number;
   embeddingProfile?: EmbeddingProfileName;
   embeddingDimensions?: number;
+  embeddingEndpoint?: string;
+  embeddingEndpointApiKey?: string;
+  embeddingEndpointModel?: string;
+  embeddingEndpointBatchSize?: number;
+  embeddingEndpointConcurrency?: number;
+  embeddingEndpointTimeoutMilliseconds?: number;
   embeddingProvider?: EmbeddingProvider;
   source?: GitHubDocumentationSource;
 }
@@ -105,6 +111,9 @@ export class DocumentationSearch {
 
   constructor(options: DocumentationSearchOptions = {}) {
     this.paths = resolvePaths(options.dataDirectory);
+    if (options.embeddingProvider && options.embeddingEndpoint) throw new Error("embeddingProvider and embeddingEndpoint cannot be used together");
+    if (Boolean(options.embeddingEndpoint) !== Boolean(options.embeddingEndpointModel)) throw new Error("embeddingEndpoint and embeddingEndpointModel must be specified together");
+    if (options.embeddingEndpoint && !options.embeddingEndpointApiKey) throw new Error("embeddingEndpointApiKey is required when embeddingEndpoint is configured");
     const storedValue = options.embeddingProvider ? null : readStoredEmbeddingProfile(this.paths.database);
     if (storedValue && !isEmbeddingProfileName(storedValue)) {
       throw new Error(`Index uses unknown embedding profile ${storedValue}. Upgrade DocumentationSearch or use a supported index.`);
@@ -124,7 +133,7 @@ export class DocumentationSearch {
         throw new Error(`--embedding-dimensions must be between ${profile.minDimensions} and ${profile.dimensions} for ${selectedProfile}.`);
       }
     }
-    this.embeddings = options.embeddingProvider ?? new TransformersEmbeddingProvider({
+    const localEmbeddings = options.embeddingProvider ?? new TransformersEmbeddingProvider({
       ...profile,
       cacheDirectory: this.paths.models,
       device: options.embeddingDevice,
@@ -134,6 +143,14 @@ export class DocumentationSearch {
       threads: options.embeddingThreads,
       dimensions: selectedDimensions,
     });
+    this.embeddings = options.embeddingEndpoint ? new EndpointDocumentEmbeddingProvider(localEmbeddings, {
+      endpoint: options.embeddingEndpoint,
+      apiKey: options.embeddingEndpointApiKey!,
+      model: options.embeddingEndpointModel!,
+      batchSize: options.embeddingEndpointBatchSize,
+      concurrency: options.embeddingEndpointConcurrency,
+      timeoutMilliseconds: options.embeddingEndpointTimeoutMilliseconds,
+    }) : localEmbeddings;
     this.source = options.source ?? new GitHubDocumentationSource({ repositoryDirectory: this.paths.repository });
     this.database = new DocumentationSearchDatabase(this.paths.database, this.embeddings.dimensions);
     if (!options.embeddingProvider) {
@@ -152,6 +169,7 @@ export class DocumentationSearch {
     if (manifest && (
       manifest.embeddingProvider !== this.embeddings.name
       || manifest.embeddingModel !== this.embeddings.model
+      || (this.embeddings.endpointModel !== undefined && manifest.documentEmbeddingModel !== undefined && manifest.documentEmbeddingModel !== this.embeddings.endpointModel)
       || manifest.dimensions !== this.embeddings.dimensions
       || manifest.pooling !== (this.embeddings.pooling ?? "mean")
       || manifest.layerNorm !== this.embeddings.layerNorm
@@ -188,6 +206,25 @@ export class DocumentationSearch {
     const remotePaths = new Set(entries.map((entry) => entry.path));
     const deleted = options.limit ? [] : [...current.keys()].filter((sourcePath) => !remotePaths.has(sourcePath));
     const changed = entries.filter((entry) => options.refresh || current.get(entry.path)?.blobSha !== entry.blobSha);
+    const manifest: IndexManifest = {
+      schemaVersion: SEARCH_SCHEMA_VERSION,
+      family,
+      branch,
+      embeddingProfile: this.embeddingProfileName ?? undefined,
+      embeddingProvider: this.embeddings.name,
+      embeddingModel: this.embeddings.model,
+      documentEmbeddingModel: this.embeddings.endpointModel,
+      dimensions: this.embeddings.dimensions,
+      pooling: this.embeddings.pooling ?? "mean",
+      dtype: this.embeddings.dtype,
+      layerNorm: this.embeddings.layerNorm,
+      normalized: true,
+      documentPrefix: this.embeddings.documentPrefix,
+      queryPrefix: this.embeddings.queryPrefix,
+      maxEmbeddingCharacters: this.embeddings.maxEmbeddingCharacters,
+      updatedAt: new Date().toISOString(),
+      sourceCommit: tree.commit,
+    };
     progress(`${changed.length} changed, ${deleted.length} deleted; preparing chunks...`);
     let processed = 0;
     const parseEntries = (sourceEntries: SourceEntry[]) => mapConcurrent(sourceEntries, options.concurrency ?? 8, async (entry: SourceEntry): Promise<ParseResult> => {
@@ -227,7 +264,7 @@ export class DocumentationSearch {
     const committedPaths = new Set<string>();
     const commit = (sources: PreparedSource[]): void => {
       if (!sources.length) return;
-      this.database.replaceSources(family, sources, []);
+      this.database.replaceSources(family, sources, [], manifest);
       for (const source of sources) {
         prepared.push({ path: source.path, chunkCount: source.chunks.length });
         committedPaths.add(source.path);
@@ -336,30 +373,16 @@ export class DocumentationSearch {
       for (const group of groupSources(parsed, EMBEDDING_GROUP_CHUNK_TARGET)) await embedGroup(group);
     }
     if (overallCompleted) progress(`Embedded ${overallCompleted} chunks.`);
+    if (this.embeddings.metrics && (this.embeddings.metrics.retries || this.embeddings.metrics.truncations || this.embeddings.metrics.batchSplits || this.embeddings.metrics.deviceTransitions)) {
+      const metrics = this.embeddings.metrics;
+      progress(`Embedding adjustments: ${metrics.retries} retries, ${metrics.truncations} truncations, ${metrics.batchSplits} batch splits, ${metrics.deviceTransitions} device transitions.`);
+    }
     if (failures.length) progress(`Completed with ${failures.length} failed document${failures.length === 1 ? "" : "s"}; see the failures list in the result.`);
-    if (deleted.length) this.database.replaceSources(family, [], deleted);
+    if (deleted.length) this.database.replaceSources(family, [], deleted, manifest);
     if (prepared.length || deleted.length) {
       progress("Optimizing the full-text search index...");
       this.database.optimizeSearchIndex();
     }
-    const manifest: IndexManifest = {
-      schemaVersion: SEARCH_SCHEMA_VERSION,
-      family,
-      branch,
-      embeddingProfile: this.embeddingProfileName ?? undefined,
-      embeddingProvider: this.embeddings.name,
-      embeddingModel: this.embeddings.model,
-      dimensions: this.embeddings.dimensions,
-      pooling: this.embeddings.pooling ?? "mean",
-      dtype: this.embeddings.dtype,
-      layerNorm: this.embeddings.layerNorm,
-      normalized: true,
-      documentPrefix: this.embeddings.documentPrefix,
-      queryPrefix: this.embeddings.queryPrefix,
-      maxEmbeddingCharacters: this.embeddings.maxEmbeddingCharacters,
-      updatedAt: new Date().toISOString(),
-      sourceCommit: tree.commit,
-    };
     this.database.setManifest(manifest);
     const addedCount = prepared.filter((source) => !current.has(source.path)).length;
     const changedCount = prepared.length - addedCount;
@@ -417,6 +440,10 @@ export class DocumentationSearch {
         device: this.embeddings.activeDevice ?? this.embeddings.device ?? "unknown",
         pooling: this.embeddings.pooling ?? "mean",
         dtype: this.embeddings.dtype,
+        documentProvider: this.embeddings.endpointModel ? "endpoint" : "local",
+        endpointModel: this.embeddings.endpointModel,
+        endpointConcurrency: this.embeddings.endpointConcurrency,
+        metrics: this.embeddings.metrics,
       },
       dataDirectory: this.paths.root,
     };

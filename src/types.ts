@@ -65,6 +65,7 @@ export interface IndexManifest {
   embeddingProfile?: string;
   embeddingProvider: string;
   embeddingModel: string;
+  documentEmbeddingModel?: string;
   dimensions: number;
   pooling: string;
   dtype?: string;

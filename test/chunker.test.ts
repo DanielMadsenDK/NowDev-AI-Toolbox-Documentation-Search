@@ -191,4 +191,148 @@ Apache Jelly documentation.
     expect(sections.every((chunk) => chunk.content.length <= 768)).toBe(true);
     expect(sections.at(-1)?.content).toContain("Paragraph 19:");
   });
+
+  it("summarizes method prose after fenced code", () => {
+    const markdown = `# Example
+## Example - run()
+
+\`\`\`javascript
+const heading = "not a summary";
+\`\`\`
+
+Runs the example after initialization.
+
+Later details.`;
+    const method = chunkDocument("markdown/api-reference/server-api-reference/c_ExampleAPI.md", markdown, "australia", "australia").find((chunk) => chunk.chunkType === "method");
+    expect(method?.metadata.summary).toBe("Runs the example after initialization.");
+  });
+
+  it("skips lists, tables, and HTML blocks before method prose", () => {
+    const markdown = `# Example
+## Example - run()
+- preliminary item
+
+|Name|Type|Description|
+|----|----|-----------|
+|value|String|Input value.|
+
+<table><tr><td>Not prose</td></tr></table>
+
+Runs with the supplied value.`;
+    const method = chunkDocument("markdown/api-reference/server-api-reference/c_ExampleAPI.md", markdown, "australia", "australia").find((chunk) => chunk.chunkType === "method");
+    expect(method?.metadata.summary).toBe("Runs with the supplied value.");
+  });
+
+  it.each([
+    ["c_GlideRecordAPI.md", "GlideRecord"],
+    ["r_GlideQueryAPI.md", "GlideQuery"],
+    ["p_GlideSystemScoped.md", "GlideSystem"],
+  ])("derives API object names from prefixed filenames", (filename, expected) => {
+    const [overview] = chunkDocument(`markdown/api-reference/server-api-reference/${filename}`, "No title is available.", "australia", "australia");
+    expect(overview?.objectName).toBe(expected);
+    expect(overview?.content).toContain(`Object: ${expected}`);
+  });
+
+  it("preserves API suffixes in REST API filenames", () => {
+    const [overview] = chunkDocument("markdown/api-reference/rest-apis/c_CustomAPI.md", "REST endpoint documentation.", "australia", "australia");
+    expect(overview?.objectName).toBe("CustomAPI");
+  });
+
+  it.each([
+    ["Global API", "Global behavior.", ["Global"]],
+    ["Scoped API", "Scoped behavior.", ["Scoped"]],
+    ["Mixed API", "Available to global and scoped applications.", ["Global", "Scoped"]],
+  ])("extracts API scopes", (title, prose, expected) => {
+    const [overview] = chunkDocument("markdown/api-reference/server-api-reference/c_ScopeExampleAPI.md", `---\ntitle: ${title}\n---\n# ${title}\n${prose}`, "australia", "australia");
+    expect(overview?.metadata.scopes).toEqual(expected);
+  });
+
+  it("prefers frontmatter descriptions for API overview summaries", () => {
+    const [overview] = chunkDocument("markdown/api-reference/server-api-reference/c_ExampleAPI.md", "---\ntitle: Example - Global\ndescription: Preferred concise API description.\n---\n# Example - Global\nFallback body paragraph.", "australia", "australia");
+    expect(overview?.content).toContain("Summary: Preferred concise API description.");
+    expect(overview?.content).not.toContain("Fallback body paragraph");
+  });
+
+  it("classifies Markdown tables by complete normalized header shape", () => {
+    const markdown = `# Example
+## Example - inspect()
+Inspects a value.
+
+|Name|Type|Value|
+|----|----|-----|
+|unrelated|String|Ignored|
+
+|Name|Type|Description|Optional|
+|----|----|-----------|--------|
+|value|String|Input value.|No|
+
+|Type|Description|
+|----|-----------|
+|Boolean|Whether it matched.|
+
+|Property|Description|
+|--------|-----------|
+|count|Number matched.|
+
+|Properties|Description|
+|----------|-----------|
+|items|Matched values.|`;
+    const chunks = chunkDocument("markdown/api-reference/server-api-reference/c_ExampleAPI.md", markdown, "australia", "australia");
+    expect(chunks.filter((chunk) => chunk.chunkType === "parameter")).toHaveLength(1);
+    const returns = chunks.filter((chunk) => chunk.chunkType === "returns");
+    expect(returns).toHaveLength(3);
+    expect(returns.map((chunk) => chunk.content)).toEqual(expect.arrayContaining([
+      expect.stringContaining("Boolean: Whether it matched."),
+      expect.stringContaining("count: Number matched."),
+      expect.stringContaining("items: Matched values."),
+    ]));
+  });
+
+  it("extracts classified HTML tables with entities and line breaks", () => {
+    const markdown = `# Example
+## Example - decode()
+Decodes a value.
+<table><tr><th>Name</th><th>Type</th><th>Description</th></tr><tr><td>value</td><td>String</td><td>One&lt;Two<br>Three&amp;Four</td></tr></table>`;
+    const parameter = chunkDocument("markdown/api-reference/server-api-reference/c_ExampleAPI.md", markdown, "australia", "australia").find((chunk) => chunk.chunkType === "parameter");
+    expect(parameter?.content).toContain("One<Two Three&Four");
+  });
+
+  it("adds complete shared and focused method metadata", () => {
+    const markdown = `# Example
+## Example - run(String value)
+Runs an example.
+|Name|Type|Description|
+|----|----|-----------|
+|value|String|Input value.|
+\`\`\`
+run("value");
+\`\`\``;
+    const chunks = chunkDocument("markdown/api-reference/server-api-reference/c_ExampleAPI.md", markdown, "australia", "australia").filter((chunk) => chunk.methodName === "run");
+    const method = chunks.find((chunk) => chunk.chunkType === "method");
+    expect(method?.metadata).toMatchObject({ object_name: "Example", method_name: "run", section: "method", examples_count: 1 });
+    expect(method?.metadata.full_content).toContain("Runs an example");
+    for (const chunk of chunks.filter((item) => item.chunkType !== "method")) {
+      expect(chunk.metadata).toMatchObject({ object_name: "Example", method_name: "run", section: chunk.chunkType, examples_count: 1 });
+      expect(chunk.metadata).not.toHaveProperty("full_content");
+    }
+  });
+
+  it("ignores headings inside fenced code across document types", () => {
+    const api = chunkDocument("markdown/api-reference/server-api-reference/c_ExampleAPI.md", "# Example\n\`\`\`markdown\n## Example - fake()\n\`\`\`\n## Example - real()\nReal method.", "australia", "australia");
+    expect(api.filter((chunk) => chunk.chunkType === "method").map((chunk) => chunk.methodName)).toEqual(["real"]);
+
+    const topic = chunkDocument("markdown/guides/example.md", "# Example\n\`\`\`markdown\n## Fake section\n\`\`\`\n## Real section\nReal content.", "australia", "australia");
+    expect(topic.filter((chunk) => chunk.chunkType === "section").map((chunk) => chunk.heading)).toEqual(["Real section"]);
+
+    const glossary = chunkDocument("markdown/glossary/example.md", "# Glossary\n\`\`\`markdown\n### Fake term\n\`\`\`\n### Real term\nReal definition.", "australia", "australia");
+    expect(glossary.filter((chunk) => chunk.chunkType === "definition").map((chunk) => chunk.heading)).toEqual(["Real term"]);
+  });
+
+  it("keeps split API chunks within a configured maximum", () => {
+    const detail = `Detailed method guidance ${"with configuration and retrieval context ".repeat(20)}`;
+    const chunks = chunkDocument("markdown/api-reference/server-api-reference/c_ExampleAPI.md", `# Example\n## Example - run()\n${detail}`, "australia", "australia", 400);
+    const methods = chunks.filter((chunk) => chunk.chunkType === "method");
+    expect(methods.length).toBeGreaterThan(1);
+    expect(methods.every((chunk) => chunk.content.length <= 400)).toBe(true);
+  });
 });

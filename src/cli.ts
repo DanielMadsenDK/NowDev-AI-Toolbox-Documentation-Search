@@ -21,6 +21,12 @@ interface GlobalOptions {
 	embeddingThreads?: number;
 	embeddingProfile?: EmbeddingProfileName;
 	embeddingDimensions?: number;
+	embeddingEndpoint?: string;
+	embeddingEndpointModel?: string;
+	embeddingApiKeyEnv: string;
+	embeddingEndpointBatchSize?: number;
+	embeddingEndpointConcurrency?: number;
+	embeddingEndpointTimeout?: number;
 }
 
 function integerOption(name: string, minimum: number, maximum: number) {
@@ -46,6 +52,16 @@ function numberOption(name: string, minimum: number, maximum: number) {
 
 function createContext(command: Command): DocumentationSearch {
 	const options = command.optsWithGlobals<GlobalOptions>();
+	if (Boolean(options.embeddingEndpoint) !== Boolean(options.embeddingEndpointModel)) {
+		throw new Error("--embedding-endpoint and --embedding-endpoint-model must be specified together");
+	}
+	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(options.embeddingApiKeyEnv)) {
+		throw new Error("--embedding-api-key-env must be a valid environment variable name");
+	}
+	const endpointApiKey = options.embeddingEndpoint ? process.env[options.embeddingApiKeyEnv] : undefined;
+	if (options.embeddingEndpoint && !endpointApiKey) {
+		throw new Error(`Embedding API key environment variable ${options.embeddingApiKeyEnv} is not set`);
+	}
 	return new DocumentationSearch({
 		dataDirectory: options.dataDir,
 		embeddingDevice: options.device,
@@ -55,6 +71,12 @@ function createContext(command: Command): DocumentationSearch {
 		embeddingThreads: options.embeddingThreads,
 		embeddingProfile: options.embeddingProfile,
 		embeddingDimensions: options.embeddingDimensions,
+		embeddingEndpoint: options.embeddingEndpoint,
+		embeddingEndpointModel: options.embeddingEndpointModel,
+		embeddingEndpointApiKey: endpointApiKey,
+		embeddingEndpointBatchSize: options.embeddingEndpointBatchSize,
+		embeddingEndpointConcurrency: options.embeddingEndpointConcurrency,
+		embeddingEndpointTimeoutMilliseconds: options.embeddingEndpointTimeout === undefined ? undefined : options.embeddingEndpointTimeout * 1000,
 		embeddingProvider: options.deterministicEmbeddings ? new HashEmbeddingProvider() : undefined,
 	});
 }
@@ -98,6 +120,12 @@ const program = new Command()
 	.option("--embedding-batch-size <count>", "texts per embedding inference batch (default: 32 CPU, 8 DirectML)", integerOption("embedding-batch-size", 1, 1024))
 	.option(`--embedding-max-characters <count>`, `override the profile-specific passage cap (MiniLM: 1024; other built-in profiles: ${DEFAULT_MAX_EMBEDDING_CHARACTERS})`, integerOption("embedding-max-characters", 256, 1_000_000))
 	.option("--embedding-threads <count>", "ONNX Runtime intra-op thread count for CPU inference (default: the host's logical core count)", integerOption("embedding-threads", 1, 1024))
+	.option("--embedding-endpoint <url>", "OpenAI-compatible /embeddings endpoint used only for document indexing")
+	.option("--embedding-endpoint-model <model>", "model ID sent to the document embedding endpoint")
+	.option("--embedding-api-key-env <name>", "environment variable containing the endpoint API key", "OPENROUTER_API_KEY")
+	.option("--embedding-endpoint-batch-size <count>", "texts per remote embedding request (default: 64)", integerOption("embedding-endpoint-batch-size", 1, 1024))
+	.option("--embedding-endpoint-concurrency <count>", "concurrent remote embedding requests (default: 4)", integerOption("embedding-endpoint-concurrency", 1, 32))
+	.option("--embedding-endpoint-timeout <seconds>", "remote request timeout before retrying (default: 30)", integerOption("embedding-endpoint-timeout", 1, 600))
 	.configureOutput({
 		outputError: (message, write) => {
 			if (process.argv.includes("--json")) write(`${JSON.stringify({ error: message.trim().replace(/^error:\s*/, "") })}\n`);
@@ -132,7 +160,7 @@ program.command("search")
 	.option("--publication <publication>", "filter by publication")
 	.option("--chunk-type <type>", "filter by chunk type")
 	.option("--topic-type <type>", "filter by topic type")
-	.option("--threshold <number>", "minimum cosine similarity, except exact API identifier matches", numberOption("threshold", -1, 1), 0.3)
+	.option("--threshold <number>", "minimum cosine similarity for semantic candidates; lexical matches remain eligible", numberOption("threshold", -1, 1), 0.3)
 	.option("--deduplicate-releases", "return only the best-scoring release of each source chunk")
 	.option("--max-per-source <count>", "maximum results from one source document", integerOption("max-per-source", 1, 10), 3)
 	.action(async (query, options, command) => withContext(command, async (context) => {

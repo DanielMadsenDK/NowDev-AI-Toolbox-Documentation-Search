@@ -130,22 +130,38 @@ function cleanCell(value: string): string {
     .trim();
 }
 
-function parseMarkdownTables(section: string): Array<Array<Record<string, string>>> {
+function normalizeHeader(value: string): string {
+  return cleanCell(value).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+interface ParsedTable {
+  headers: string[];
+  rows: Array<Record<string, string>>;
+}
+
+function pipeCells(line: string): string[] {
+  const cells = line.split("|").map(cleanCell);
+  if (cells[0] === "") cells.shift();
+  if (cells.at(-1) === "") cells.pop();
+  return cells;
+}
+
+function parseMarkdownTables(section: string): ParsedTable[] {
   const lines = section.split("\n");
-  const tables: Array<Array<Record<string, string>>> = [];
+  const tables: ParsedTable[] = [];
   for (let index = 0; index < lines.length - 2; index += 1) {
     const header = lines[index];
     const separator = lines[index + 1];
     if (!header?.includes("|") || !separator || !/^\s*\|?[\s:|-]+\|?\s*$/.test(separator)) continue;
-    const headers = header.split("|").map(cleanCell).filter(Boolean).map((item) => item.toLowerCase().replace(/[^a-z0-9]+/g, "_"));
+    const headers = pipeCells(header).map(normalizeHeader);
     const rows: Array<Record<string, string>> = [];
     let cursor = index + 2;
     while (cursor < lines.length && lines[cursor]?.includes("|")) {
-      const values = lines[cursor]!.split("|").map(cleanCell).filter((_, cellIndex, all) => !(cellIndex === 0 && all[cellIndex] === "") && !(cellIndex === all.length - 1 && all[cellIndex] === ""));
+      const values = pipeCells(lines[cursor]!);
       if (values.length === headers.length) rows.push(Object.fromEntries(headers.map((key, i) => [key, values[i] ?? ""])));
       cursor += 1;
     }
-    if (rows.length) tables.push(rows);
+    if (rows.length) tables.push({ headers, rows });
     index = cursor - 1;
   }
   return tables;
@@ -160,8 +176,8 @@ const HTML_TABLE = /<table\b[^>]*>([\s\S]*?)<\/table>/gi;
 const HTML_ROW = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
 const HTML_CELL = /<(th|td)\b[^>]*>([\s\S]*?)<\/\1>/gi;
 
-function parseHtmlTables(section: string): Array<Array<Record<string, string>>> {
-  const tables: Array<Array<Record<string, string>>> = [];
+function parseHtmlTables(section: string): ParsedTable[] {
+  const tables: ParsedTable[] = [];
   for (const tableMatch of section.matchAll(HTML_TABLE)) {
     let headers: string[] = [];
     const rows: Array<Record<string, string>> = [];
@@ -169,16 +185,24 @@ function parseHtmlTables(section: string): Array<Array<Record<string, string>>> 
       const cells = [...(rowMatch[1] ?? "").matchAll(HTML_CELL)];
       if (!cells.length) continue;
       if (cells[0]![1]!.toLowerCase() === "th") {
-        headers = cells.map((cell) => cleanCell(cell[2] ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, ""));
+        headers = cells.map((cell) => normalizeHeader(cell[2] ?? ""));
         continue;
       }
       if (!headers.length) continue;
       const values = cells.map((cell) => cleanCell(cell[2] ?? ""));
       rows.push(Object.fromEntries(headers.map((key, i) => [key, values[i] ?? ""])));
     }
-    if (rows.length) tables.push(rows);
+    if (rows.length) tables.push({ headers, rows });
   }
   return tables;
+}
+
+function conciseText(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 500) return normalized;
+  const candidate = normalized.slice(0, 500);
+  const boundary = candidate.lastIndexOf(" ");
+  return candidate.slice(0, boundary >= 250 ? boundary : 500).trim();
 }
 
 function firstParagraph(body: string): string {
@@ -192,6 +216,58 @@ function firstParagraph(body: string): string {
     result.push(value);
   }
   return result.join(" ").slice(0, 500);
+}
+
+function summarizeMethod(body: string): string {
+  const result: string[] = [];
+  let inCodeBlock = false;
+  let htmlBlock: string | null = null;
+  for (const line of body.split("\n")) {
+    const value = line.trim();
+    if (value.startsWith("```")) {
+      inCodeBlock = !inCodeBlock;
+      continue;
+    }
+    if (inCodeBlock) continue;
+    if (htmlBlock) {
+      if (new RegExp(`</${htmlBlock}>`, "i").test(value)) htmlBlock = null;
+      continue;
+    }
+    const htmlStart = value.match(/^<(table|div|section|aside|details|ul|ol|dl|pre)\b/i);
+    if (htmlStart && !new RegExp(`</${htmlStart[1]}>`, "i").test(value)) htmlBlock = htmlStart[1]!.toLowerCase();
+    if (!value || value.startsWith("#") || value.includes("|") || /^[-*+](?:\s|$)/.test(value) || value.startsWith("<")) {
+      if (result.length) break;
+      continue;
+    }
+    result.push(value);
+  }
+  return conciseText(result.join(" "));
+}
+
+function extractObjectName(title: string, sourcePath: string, docType: DocType): string {
+  if (title.includes(" - ")) return title.split(" - ")[0]!.replace(/\s*\(deprecated\)\s*$/i, "").trim();
+  let filename = path.basename(sourcePath, path.extname(sourcePath)).replace(/^[crp]_/, "");
+  if (docType !== "rest-api") filename = filename.replace(/(?:API|Scoped|Global)$/i, "");
+  filename = filename.replace(/\s*\(deprecated\)\s*$/i, "").trim();
+  if (filename) return filename;
+  return title.replace(/\s*\(deprecated\)\s*$/i, "").trim();
+}
+
+function extractScopes(title: string, body: string): string[] {
+  const scopes: string[] = [];
+  for (const match of `${title}\n${body.slice(0, 1000)}`.matchAll(/\b(global|scoped)\b/gi)) {
+    const scope = match[1]!.toLowerCase() === "global" ? "Global" : "Scoped";
+    if (!scopes.includes(scope)) scopes.push(scope);
+  }
+  return scopes;
+}
+
+function isParameterTable(table: ParsedTable): boolean {
+  return ["name", "type", "description"].every((header) => table.headers.includes(header));
+}
+
+function isReturnTable(table: ParsedTable): boolean {
+  return table.headers.includes("description") && ["type", "property", "properties"].some((header) => table.headers.includes(header));
 }
 
 function splitLongLine(line: string, maxCharacters: number): string[] {
@@ -294,7 +370,8 @@ function chunkApiDoc(sourcePath: string, markdown: string, branch: string, famil
   const docType = classifyDocType(sourcePath);
   const publication = publicationFromPath(sourcePath);
   const hash = contentHash(markdown);
-  const titleObject = title.split(" - ")[0]?.replace(/\s*\(deprecated\)\s*/i, "").trim() || path.basename(sourcePath, ".md");
+  const titleObject = extractObjectName(title, sourcePath, docType);
+  const scopes = extractScopes(title, body);
   const metadataBase = {
     ...frontmatter,
     title,
@@ -304,6 +381,8 @@ function chunkApiDoc(sourcePath: string, markdown: string, branch: string, famil
     source_path: sourcePath,
     url: rawUrl(branch, sourcePath),
     deprecated: /\(\s*deprecated\s*\)/i.test(normalizeMarkdown(title)),
+    object_name: titleObject,
+    scopes,
   };
   const lines = body.split("\n");
   const inCodeFence = codeFenceMask(lines);
@@ -323,7 +402,7 @@ function chunkApiDoc(sourcePath: string, markdown: string, branch: string, famil
     chunkIndex: 0,
     title,
     heading: null,
-    content: apiContent("Summary", titleObject, null, null, release, firstParagraph(overview)),
+    content: apiContent("Summary", titleObject, null, null, release, conciseText(text(frontmatter.description)) || firstParagraph(overview)),
     topicType: null,
     product: nullable(frontmatter.product),
     classification: nullable(frontmatter.classification),
@@ -339,12 +418,23 @@ function chunkApiDoc(sourcePath: string, markdown: string, branch: string, famil
     const end = positions[methodIndex + 1]?.index ?? lines.length;
     const section = lines.slice(position.index, end).join("\n").trim();
     const methodName = position.signature.replaceAll("\\(", "(").split("(")[0]!.trim();
-    const summary = firstParagraph(lines.slice(position.index + 1, end).join("\n"));
+    const summary = summarizeMethod(lines.slice(position.index + 1, end).join("\n"));
     const tables = [...parseMarkdownTables(section), ...parseHtmlTables(section)];
-    const parameters = tables.flat().filter((row) => "name" in row && "type" in row);
-    const returns = tables.flat().filter((row) => !("name" in row) && ("type" in row || "property" in row || "properties" in row));
+    const parameters = tables.filter(isParameterTable).flatMap((table) => table.rows);
+    const returns = tables.filter((table) => !isParameterTable(table) && isReturnTable(table)).flatMap((table) => table.rows);
     const examples = extractExamples(section);
-    const methodMetadata = { ...metadataBase, method_signature: position.signature, summary, parameters, returns, examples, full_content: section };
+    const methodMetadata = {
+      ...metadataBase,
+      object_name: position.objectName,
+      method_name: methodName,
+      method_signature: position.signature,
+      summary,
+      parameters,
+      returns,
+      examples,
+      examples_count: examples.length,
+      full_content: section,
+    };
     const append = (chunkType: ChunkType, content: string, metadata: Record<string, unknown>) => chunks.push({
       docType,
       publication,
@@ -361,17 +451,18 @@ function chunkApiDoc(sourcePath: string, markdown: string, branch: string, famil
       lastUpdated: nullable(frontmatter.last_updated),
       objectName: position.objectName,
       methodName,
-      metadata,
+      metadata: { ...metadata, section: chunkType },
       contentHash: hash,
     });
     const appendDetail = (chunkType: ChunkType, label: string, detail: string, metadata: Record<string, unknown>) => {
       const contents = splitApiContent(label, position.objectName, methodName, position.signature, release, detail, maxCharacters);
       contents.forEach((content, partIndex) => append(chunkType, content, contents.length > 1 ? { ...metadata, chunk_part: partIndex + 1 } : metadata));
     };
+    const { full_content: _fullContent, ...focusedMetadata } = methodMetadata;
     appendDetail(docType === "rest-api" ? "endpoint" : "method", "Summary", summary, methodMetadata);
-    parameters.forEach((parameter) => appendDetail("parameter", "Parameter", `${parameter.name}: ${parameter.type}. ${parameter.description ?? ""}`.trim(), { ...methodMetadata, full_content: undefined, parameter }));
-    returns.forEach((result) => appendDetail("returns", "Returns", `${result.type ?? ""}: ${result.description ?? ""}`.trim(), { ...methodMetadata, full_content: undefined, return: result }));
-    examples.forEach((example, exampleIndex) => appendDetail("example", "Example", example, { ...methodMetadata, full_content: undefined, example, example_index: exampleIndex + 1 }));
+    parameters.forEach((parameter) => appendDetail("parameter", "Parameter", `${parameter.name}: ${parameter.type}. ${parameter.description ?? ""}`.trim(), { ...focusedMetadata, parameter }));
+    returns.forEach((result) => appendDetail("returns", "Returns", `${result.type ?? result.property ?? result.properties ?? ""}: ${result.description ?? ""}`.trim(), { ...focusedMetadata, return: result }));
+    examples.forEach((example, exampleIndex) => appendDetail("example", "Example", example, { ...focusedMetadata, example, example_index: exampleIndex + 1 }));
   }
   return chunks;
 }
