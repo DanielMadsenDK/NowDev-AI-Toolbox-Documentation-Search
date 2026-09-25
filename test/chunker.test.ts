@@ -335,4 +335,54 @@ run("value");
     expect(methods.length).toBeGreaterThan(1);
     expect(methods.every((chunk) => chunk.content.length <= 400)).toBe(true);
   });
+
+  it("adds breadcrumb and heading context and splits at H3 headings", () => {
+    const markdown = "---\ntitle: Create a data policy\ndescription: Define data rules for a table.\nproduct: Platform\nbreadcrumb: [Data policy, Forms, fields, and lists, Administer]\n---\n# Create a data policy\nDefine data rules for a table.\n## Procedure\n### Add rules\nRule steps.\n## Result\nDone.";
+    const chunks = chunkDocument("markdown/platform-administration/t_CreateADataPolicy.md", markdown, "australia", "australia");
+    expect(chunks.map((chunk) => [chunk.chunkType, chunk.heading])).toEqual([["overview", null], ["section", "Add rules"], ["section", "Result"]]);
+    expect(chunks[0]?.content).toBe("Title: Create a data policy\nPath: Administer > Forms, fields, and lists > Data policy\nProduct: Platform\nSummary: Define data rules for a table.");
+    expect(chunks[1]?.content).toContain("Section: Procedure > Add rules");
+    expect(chunks[1]?.context).toBe("Administer > Forms, fields, and lists > Data policy > Procedure > Add rules");
+    expect(chunks.every((chunk) => !chunk.content.includes("Release:"))).toBe(true);
+  });
+
+  it("flattens HTML tables and markdown noise in searchable topic text", () => {
+    const markdown = `---\ntitle: Roles\n---\n# Roles\n## Available roles\nSelect **System Policy** &gt; **Rules**. See [the guide](https://example.test/guide) for sys\\_id details.\n\n\\[Omitted image "roles.png"\\] Alt text: Roles screen\n\n<table><thead><tr><th>Role</th><th>Purpose</th></tr></thead><tbody><tr><td>admin</td><td>Full &amp; unrestricted access</td></tr></tbody></table>`;
+    const section = chunkDocument("markdown/platform-security/roles.md", markdown, "australia", "australia").find((chunk) => chunk.chunkType === "section");
+    expect(section?.content).toContain("Select System Policy > Rules. See the guide for sys_id details.");
+    expect(section?.content).toContain("Role: admin; Purpose: Full & unrestricted access");
+    expect(section?.content).not.toMatch(/<t[dhr]|Omitted image|https:/);
+  });
+
+  it("lists parameters and returns on the method chunk without repeating sibling arrays on detail chunks", () => {
+    const markdown = `# Example
+## Example - run(String value)
+Runs an example.
+|Name|Type|Description|
+|----|----|-----------|
+|value|String|Input value.|
+
+|Type|Description|
+|----|-----------|
+|Boolean|Whether it ran.|`;
+    const chunks = chunkDocument("markdown/api-reference/server-api-reference/c_ExampleAPI.md", markdown, "australia", "australia").filter((chunk) => chunk.methodName === "run");
+    expect(chunks.find((chunk) => chunk.chunkType === "method")?.content).toContain("Summary: Runs an example. Parameters: value: String. Returns: Boolean.");
+    const parameter = chunks.find((chunk) => chunk.chunkType === "parameter");
+    expect(parameter?.metadata).toHaveProperty("parameter");
+    expect(parameter?.metadata).not.toHaveProperty("parameters");
+    expect(parameter?.metadata).not.toHaveProperty("returns");
+  });
+
+  it("keeps later methods when a closing fence is glued to code and repeated on its own line", () => {
+    const markdown = "# Example\n## Example - first()\nFirst method.\n\n```\nfirst();\nlast();```\n```\n\nOutput:\n\n```\ndone\n```\n\n## Example - second()\nSecond method.\n\n```\nsecond();```\n\n## Example - third()\nThird method.";
+    const methods = chunkDocument("markdown/api-reference/c_ExampleAPI.md", markdown, "australia", "australia").filter((chunk) => chunk.chunkType === "method");
+    expect(methods.map((chunk) => chunk.methodName)).toEqual(["first", "second", "third"]);
+  });
+
+  it("repairs code fences glued to the end of prose lines", () => {
+    const markdown = "# Example\n## Example - first()\nOptions for a button click.```\n{ buttons: [] }\n```\n\n## Example - second()\nSecond method.";
+    const methods = chunkDocument("markdown/api-reference/c_ExampleAPI.md", markdown, "australia", "australia").filter((chunk) => chunk.chunkType === "method");
+    expect(methods.map((chunk) => chunk.methodName)).toEqual(["first", "second"]);
+  });
 });
+

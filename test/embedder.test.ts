@@ -1,7 +1,32 @@
 import os from "node:os";
-import { describe, expect, it, vi } from "vitest";
-import { createEmbeddingBatches, EndpointDocumentEmbeddingProvider, HashEmbeddingProvider, TransformersEmbeddingProvider, truncateEmbeddingText } from "../src/embedder.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createEmbeddingBatches, DEFAULT_MAX_EMBEDDING_WORKERS, EndpointDocumentEmbeddingProvider, HashEmbeddingProvider, TransformersEmbeddingProvider, truncateEmbeddingText } from "../src/embedder.js";
+import { EmbeddingWorkerPool } from "../src/embedding-pool.js";
 import { DEFAULT_EMBEDDING_PROFILE, EMBEDDING_PROFILES } from "../src/embedding-profiles.js";
+
+const fakeWorkerUrl = new URL("./fixtures/fake-embedding-worker.mjs", import.meta.url);
+const disposables: Array<{ dispose(): Promise<void> }> = [];
+afterEach(async () => {
+  await Promise.all(disposables.splice(0).map((item) => item.dispose()));
+});
+
+function counters() {
+  const buffer = new SharedArrayBuffer(3 * Int32Array.BYTES_PER_ELEMENT);
+  return { buffer, peak: () => Atomics.load(new Int32Array(buffer), 1), jobs: () => Atomics.load(new Int32Array(buffer), 2) };
+}
+
+function pool(options: Partial<ConstructorParameters<typeof EmbeddingWorkerPool>[0]> & { workerData?: Record<string, unknown> } = {}): EmbeddingWorkerPool {
+  const created = new EmbeddingWorkerPool({ size: 2, workerUrl: fakeWorkerUrl, ...options, workerData: { dimensions: 4, ...options.workerData } });
+  disposables.push(created);
+  return created;
+}
+
+function pooledProvider(options: ConstructorParameters<typeof TransformersEmbeddingProvider>[0] = {}): TransformersEmbeddingProvider {
+  // sortByLength: false skips token counting, so no tokenizer (or model) is ever loaded.
+  const provider = new TransformersEmbeddingProvider({ workers: 3, dimensions: 4, batchSize: 2, sortByLength: false, workerUrl: fakeWorkerUrl, ...options });
+  disposables.push(provider);
+  return provider;
+}
 
 describe("createEmbeddingBatches", () => {
   it("groups similarly sized texts while preserving original indices", () => {
@@ -25,6 +50,41 @@ describe("createEmbeddingBatches", () => {
     expect(() => createEmbeddingBatches(["x".repeat(40)], 3, false, 12)).toThrow("exceeds the configured batch token budget");
   });
 
+  it("orders by real token counts when they are known", () => {
+    // Character length and token count disagree: the long prose tokenizes shorter than the short identifier soup.
+    const texts = ["plain prose that is long", "a.b_c(d)", "mid"];
+    const batches = createEmbeddingBatches(texts, 2, true, Number.POSITIVE_INFINITY, [5, 9, 1]);
+    expect(batches.map((batch) => batch.map((item) => item.index))).toEqual([[2, 0], [1]]);
+    expect(() => createEmbeddingBatches(texts, 2, true, Number.POSITIVE_INFINITY, [1])).toThrow("Expected 3 token counts");
+  });
+
+  it("splits the CPU thread budget across embedding workers", () => {
+    vi.spyOn(os, "totalmem").mockReturnValue(32 * 1024 ** 3);
+    const budgeted = new TransformersEmbeddingProvider({ threads: 4 });
+    expect(budgeted).toMatchObject({ workers: 4, threadsPerWorker: 1, batchSize: 16 });
+    const capped = new TransformersEmbeddingProvider({ threads: 64 });
+    expect(capped).toMatchObject({ workers: DEFAULT_MAX_EMBEDDING_WORKERS, threadsPerWorker: 8 });
+    const inProcess = new TransformersEmbeddingProvider({ threads: 6, workers: 1 });
+    expect(inProcess).toMatchObject({ workers: 1, threadsPerWorker: 6, batchSize: 32 });
+    // GPU devices keep the pool for the CPU fallback after a GPU failure.
+    expect(new TransformersEmbeddingProvider({ device: "dml", threads: 8 })).toMatchObject({ workers: 8, batchSize: 8 });
+    vi.restoreAllMocks();
+  });
+
+  it("caps the default worker count by each worker's model memory", () => {
+    vi.spyOn(os, "totalmem").mockReturnValue(16 * 1024 ** 3);
+    // Large models get few workers: six ~1.5 GB nomic workers pushed a 16 GB Mac deep into swap.
+    const nomic = new TransformersEmbeddingProvider({ ...EMBEDDING_PROFILES["nomic-embed-text-v1.5"], threads: 10 });
+    expect(nomic).toMatchObject({ workers: 3, threadsPerWorker: 3 });
+    expect(new TransformersEmbeddingProvider({ threads: 10 }).workers).toBe(DEFAULT_MAX_EMBEDDING_WORKERS);
+    expect(new TransformersEmbeddingProvider({ model: "custom/model", threads: 10 }).workers).toBe(3);
+    // An explicit worker count is the user's decision, and some worker always remains.
+    expect(new TransformersEmbeddingProvider({ ...EMBEDDING_PROFILES["nomic-embed-text-v1.5"], threads: 10, workers: 6 }).workers).toBe(6);
+    vi.spyOn(os, "totalmem").mockReturnValue(2 * 1024 ** 3);
+    expect(new TransformersEmbeddingProvider({ ...EMBEDDING_PROFILES["nomic-embed-text-v1.5"], threads: 10 }).workers).toBe(1);
+    vi.restoreAllMocks();
+  });
+
   it("exposes the configured execution device and batch size", () => {
     const provider = new TransformersEmbeddingProvider({ device: "webgpu", batchSize: 64 });
     expect(provider.device).toBe("webgpu");
@@ -35,7 +95,7 @@ describe("createEmbeddingBatches", () => {
     const provider = new TransformersEmbeddingProvider({ device: "dml" });
     expect(provider.batchSize).toBe(8);
     expect(provider.maxBatchTokens).toBe(4096);
-    expect(provider.maxEmbeddingCharacters).toBe(2048);
+    expect(provider.maxEmbeddingCharacters).toBe(EMBEDDING_PROFILES[DEFAULT_EMBEDDING_PROFILE].maxEmbeddingCharacters);
   });
 
   it("defaults CPU thread count to the available parallelism and allows overriding it", () => {
@@ -45,14 +105,10 @@ describe("createEmbeddingBatches", () => {
     expect(overriddenProvider.threads).toBe(2);
   });
 
-  it("uses the BGE embedding profile by default", () => {
+  it("takes unset options from the default embedding profile", () => {
     const provider = new TransformersEmbeddingProvider();
-    expect(provider.model).toBe("Xenova/bge-base-en-v1.5");
-    expect(provider.dimensions).toBe(768);
-    expect(provider.pooling).toBe("cls");
-    expect(provider.layerNorm).toBe(false);
-    expect(provider.documentPrefix).toBe("");
-    expect(provider.queryPrefix).toBe("Represent this sentence for searching relevant passages: ");
+    const { minDimensions: _minDimensions, ...profile } = EMBEDDING_PROFILES[DEFAULT_EMBEDDING_PROFILE];
+    expect(provider).toMatchObject(profile);
   });
 
   it("defines model-correct curated ONNX embedding profiles", () => {
@@ -86,6 +142,111 @@ describe("createEmbeddingBatches", () => {
   it("rejects whitespace-only inputs consistently", async () => {
     await expect(new HashEmbeddingProvider(4).embed(["  "])).rejects.toThrow("index 0 is empty");
     await expect(new TransformersEmbeddingProvider().embed(["\n"])).rejects.toThrow("index 0 is empty");
+  });
+});
+
+describe("EmbeddingWorkerPool", () => {
+  it("runs at most one job per worker at a time", async () => {
+    const usage = counters();
+    const workers = pool({ size: 2, workerData: { counters: usage.buffer, delayMilliseconds: 20 } });
+    const results = await Promise.all(["a", "bb", "ccc", "dddd", "eeeee", "ffffff"].map((text) => workers.run([text])));
+    expect(results.map((data) => data[0])).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(usage.jobs()).toBe(6);
+    expect(usage.peak()).toBe(2);
+  });
+
+  it("rejects a job whose worker reports an error and keeps serving others", async () => {
+    const workers = pool();
+    await expect(workers.run(["fail"])).rejects.toThrow("simulated failure");
+    expect((await workers.run(["ok"]))[0]).toBe(2);
+  });
+
+  it("replaces a crashed worker on the next job", async () => {
+    const workers = pool({ size: 1 });
+    await expect(workers.run(["crash"])).rejects.toThrow("exited unexpectedly");
+    expect((await workers.run(["again"]))[0]).toBe(5);
+  });
+
+  it("fails to start when a worker cannot load", async () => {
+    await expect(pool({ workerData: { failStartup: true } }).start()).rejects.toThrow("simulated startup failure");
+  });
+
+  it("shuts down while idle and restarts for the next job", async () => {
+    const workers = pool({ idleMilliseconds: 10 });
+    await workers.run(["first"]);
+    await vi.waitFor(() => expect((workers as unknown as { workers: unknown[] }).workers).toHaveLength(0));
+    expect((await workers.run(["second"]))[0]).toBe(6);
+  });
+});
+
+describe("TransformersEmbeddingProvider worker pool", () => {
+  it("embeds bulk batches across workers and restores input order", async () => {
+    const provider = pooledProvider();
+    const texts = ["a", "bbb", "cc", "dddddd", "eeee", "fffff", "g"];
+    const vectors = await provider.embed(texts);
+    expect(vectors.map((vector) => vector[0])).toEqual(texts.map((text) => text.length));
+    expect(provider.metrics.workerFallbacks).toBe(0);
+  });
+
+  it("splits a batch that runs out of memory inside a worker", async () => {
+    const provider = pooledProvider({ batchSize: 4 });
+    const vectors = await provider.embed(["one", "oom", "three", "four"]);
+    expect(vectors.map((vector) => vector[0])).toEqual([3, 3, 5, 4]);
+    expect(provider.metrics.batchSplits).toBeGreaterThan(0);
+  });
+
+  it("delivers no batch after the pass has failed", async () => {
+    const provider = pooledProvider({ batchSize: 1 });
+    let delivered = 0;
+    let settled = false;
+    const pass = provider.embedBatched(["a", "b", "fail", "d", "e", "f", "g", "h"], () => {
+      if (settled) throw new Error("batch delivered after the pass failed");
+      delivered += 1;
+    }).finally(() => { settled = true; });
+    await expect(pass).rejects.toThrow("simulated failure");
+    const deliveredAtFailure = delivered;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(delivered).toBe(deliveredAtFailure);
+    expect(delivered).toBeLessThan(7);
+  });
+
+  it("moves embedding to the CPU after a GPU failure and pools the next pass", async () => {
+    const provider = pooledProvider({ device: "webgpu" });
+    vi.spyOn(provider as unknown as { inferInProcess(texts: string[]): Promise<Float32Array[]> }, "inferInProcess").mockImplementation(async (texts) => {
+      if (provider.activeDevice !== "cpu") throw new Error("WebGPU device was lost");
+      return texts.map(() => new Float32Array([9, 0, 0, 0]));
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    // The failing pass finishes in-process on the CPU...
+    expect((await provider.embed(["a", "bb", "ccc"])).map((vector) => vector[0])).toEqual([9, 9, 9]);
+    expect(provider.activeDevice).toBe("cpu");
+    expect(provider.metrics.deviceTransitions).toBe(1);
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("continuing on the CPU"));
+    // ...and later passes use the CPU worker pool, whose fixture vectors carry each text's length.
+    expect((await provider.embed(["dddd", "e"])).map((vector) => vector[0])).toEqual([4, 1]);
+    errors.mockRestore();
+  });
+
+  it("embeds queries on the CPU even when indexing on a GPU", async () => {
+    const provider = pooledProvider({ device: "webgpu" });
+    const inProcess = vi.spyOn(provider as unknown as { inferInProcess(texts: string[], query?: boolean): Promise<Float32Array[]> }, "inferInProcess")
+      .mockImplementation(async (texts) => texts.map(() => new Float32Array(4)));
+    await provider.embedQuery("GlideRecord");
+    expect(inProcess).toHaveBeenCalledWith(["GlideRecord"], true);
+    expect(provider.activeDevice).toBe("webgpu");
+  });
+
+  it("falls back to in-process embedding when the worker script is missing", async () => {
+    const provider = pooledProvider({ workerUrl: new URL("./fixtures/missing-worker.mjs", import.meta.url) });
+    const inProcess = vi.spyOn(provider as unknown as { inferInProcess(texts: string[]): Promise<Float32Array[]> }, "inferInProcess")
+      .mockImplementation(async (texts) => texts.map(() => new Float32Array([7, 0, 0, 0])));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const vectors = await provider.embed(["a", "b", "c"]);
+    expect(vectors.map((vector) => vector[0])).toEqual([7, 7, 7]);
+    expect(inProcess).toHaveBeenCalled();
+    expect(provider.metrics.workerFallbacks).toBe(1);
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("worker script is missing"));
+    errors.mockRestore();
   });
 });
 

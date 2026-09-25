@@ -1,24 +1,32 @@
 #!/usr/bin/env node
 import { fileURLToPath } from "node:url";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { PACKAGE_NAME, PACKAGE_VERSION } from "./config.js";
 import { DocumentationSearch } from "./service-context.js";
 import type { SearchResult } from "./types.js";
 
+// Compact JSON: indentation only costs the calling model tokens.
 function result(value: unknown) {
 	return {
-		content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+		content: [{ type: "text" as const, text: JSON.stringify(value) }],
 	};
 }
 
-type CompactSearchResult = Omit<SearchResult, "metadata" | "contentHash"> & {
+type CompactSearchResult = Omit<SearchResult, "metadata" | "contentHash" | "context"> & {
 	sourceUrl?: string;
+	breadcrumb?: string;
 };
 
+export const DOCUMENT_URI_TEMPLATE = "servicenow-doc://{release}/{+sourcePath}";
+
+export function documentUri(release: string, sourcePath: string): string {
+	return `servicenow-doc://${encodeURIComponent(release)}/${sourcePath.split("/").map(encodeURIComponent).join("/")}`;
+}
+
 export const MCP_TOOL_DESCRIPTIONS = {
-	search: "Hybrid semantic and keyword search over the local ServiceNow documentation index. Start with the user's original wording and a release filter when known; inspect that baseline before applying docType, publication, chunkType, or topicType filters. docType is the indexed source classification, not the ServiceNow topic; leave it unset for procedural questions. Use maxResultsPerSource: 1 for broad topic discovery.",
+	search: "Hybrid semantic and keyword search over the local ServiceNow documentation index. Start with the user's original wording and a release filter when known; inspect that baseline before applying docType, publication, chunkType, or topicType filters. The documentation uses its own vocabulary, so everyday wording can miss the page that answers it: for a scripting task that does not name an API (\"update a record without running business rules\"), search again with the API object and method you expect (\"GlideRecord setWorkflow business rules\") and docType: \"scripting-api\"; for a question that describes a feature instead of naming it, search again with its canonical ServiceNow name (\"Discovery\", \"Domain separation\"). docType is the indexed source classification, not the ServiceNow topic; leave it unset for configuration procedures. Use maxResultsPerSource: 1 for broad topic discovery. Set rerank: true to rescore the top candidates with a local cross-encoder when the first results look close but not right.",
 	document: "Fetch complete indexed chunks for a selected ServiceNowDocs source path. Use only when the matching search result and its outline cannot establish the answer; full documents can be large.",
 	outline: "Fetch headings and concise previews for a selected ServiceNowDocs source path. Prefer this after a relevant but incomplete search result or when document scope is unclear; use the same sourcePath selected from search.",
 	publications: "List locally indexed publications and document counts. Use this to discover publication filters after inspecting an unfiltered search result.",
@@ -26,13 +34,42 @@ export const MCP_TOOL_DESCRIPTIONS = {
 	update: "Download and incrementally index public ServiceNowDocs content. This mutates the local index; use only when requested. Use limit for a smoke test, avoid refresh for routine updates, and inspect failures before relying on complete coverage.",
 } as const;
 
+function breadcrumbText(value: unknown): string | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const items = value.filter((item): item is string => typeof item === "string" && item.trim() !== "");
+	return items.length ? [...items].reverse().join(" > ") : undefined;
+}
+
 export function formatSearchResults(results: SearchResult[], includeMetadata: boolean): Array<SearchResult | CompactSearchResult> {
 	if (includeMetadata) return results;
-	return results.map(({ metadata, contentHash: _contentHash, ...searchResult }) => {
-		const sourceUrl = typeof metadata.url === "string" ? metadata.url : undefined;
-		return sourceUrl ? { ...searchResult, sourceUrl } : searchResult;
+	return results.map(({ metadata, contentHash: _contentHash, context: _context, ...searchResult }) => {
+		// Prefer the public docs page over the raw GitHub markdown; ServiceNowDocs escapes underscores in canonical URLs.
+		const canonicalUrl = typeof metadata.canonical_url === "string" ? metadata.canonical_url.replaceAll("\\_", "_") : undefined;
+		const sourceUrl = canonicalUrl ?? (typeof metadata.url === "string" ? metadata.url : undefined);
+		const breadcrumb = breadcrumbText(metadata.breadcrumb);
+		return { ...searchResult, ...(sourceUrl ? { sourceUrl } : {}), ...(breadcrumb ? { breadcrumb } : {}) };
 	});
 }
+
+const searchResultSchema = z.looseObject({
+	id: z.number().optional(),
+	docType: z.string(),
+	publication: z.string(),
+	sourcePath: z.string(),
+	release: z.string(),
+	chunkType: z.string(),
+	chunkIndex: z.number(),
+	title: z.string(),
+	heading: z.string().nullable(),
+	content: z.string(),
+	objectName: z.string().nullable(),
+	methodName: z.string().nullable(),
+	similarity: z.number(),
+	score: z.number(),
+	sourceUrl: z.string().optional(),
+	breadcrumb: z.string().optional(),
+	metadata: z.record(z.string(), z.unknown()).optional(),
+});
 
 export async function startMcpServer(dataDirectory?: string): Promise<void> {
 	const context = new DocumentationSearch({ dataDirectory: dataDirectory ?? process.env.NOWDEV_AI_TOOLBOX_DOCUMENTATIONSEARCH_HOME });
@@ -47,6 +84,7 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 			threshold: z.number().min(-1).max(1).default(0.3).describe("Minimum cosine similarity; exact API object and method keyword matches are retained below this value"),
 			deduplicateReleases: z.boolean().default(false),
 			maxResultsPerSource: z.number().int().min(1).max(10).default(3),
+			rerank: z.boolean().default(false).describe("Rescore the top candidates with a local cross-encoder; adds several hundred milliseconds"),
 			release: z.string().optional(),
 			docType: z.enum(["scripting-api", "rest-api", "scripting-guide", "developer-guide", "product-doc", "release-notes", "glossary"]).optional(),
 			publication: z.string().optional(),
@@ -54,35 +92,57 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 			topicType: z.string().optional(),
 			includeMetadata: z.boolean().default(false).describe("Include detailed source metadata such as API parameters and examples. Omit for compact agent-oriented results."),
 		}),
-		annotations: { readOnlyHint: true, idempotentHint: true },
-	}, async ({ query, includeMetadata, ...options }) => result(formatSearchResults(await context.search(query, options), includeMetadata)));
+		outputSchema: z.object({ results: z.array(searchResultSchema) }),
+		annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+	}, async ({ query, includeMetadata, ...options }) => {
+		const results = formatSearchResults(await context.search(query, options), includeMetadata);
+		const documents = new Map(results.map((item) => [`${item.release}\u0000${item.sourcePath}`, item]));
+		return {
+			structuredContent: { results },
+			content: [
+				{ type: "text" as const, text: JSON.stringify(results) },
+				...[...documents.values()].map((item) => ({ type: "resource_link" as const, uri: documentUri(item.release, item.sourcePath), name: item.sourcePath, title: item.title, mimeType: "application/json" })),
+			],
+		};
+	});
+
+	server.registerResource("servicenow-document", new ResourceTemplate(DOCUMENT_URI_TEMPLATE, { list: undefined }), {
+		title: "ServiceNow document",
+		description: "Complete indexed chunks for one ServiceNowDocs source path in one release, as returned by get_servicenow_document.",
+		mimeType: "application/json",
+	}, async (uri, { release, sourcePath }) => {
+		const [releaseValue, pathValue] = [release, sourcePath].map((value) => decodeURIComponent(Array.isArray(value) ? value.join("/") : String(value)));
+		const chunks = context.getDocument(pathValue!, releaseValue);
+		if (!chunks.length) throw new Error(`No indexed document ${pathValue} in release ${releaseValue}`);
+		return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(chunks) }] };
+	});
 
 	server.registerTool("get_servicenow_document", {
 		title: "Get ServiceNow document",
 		description: MCP_TOOL_DESCRIPTIONS.document,
 		inputSchema: z.object({ sourcePath: z.string().min(1), release: z.string().optional() }),
-		annotations: { readOnlyHint: true, idempotentHint: true },
+		annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 	}, async ({ sourcePath, release }) => result(context.getDocument(sourcePath, release)));
 
 	server.registerTool("get_servicenow_document_outline", {
 		title: "Get ServiceNow document outline",
 		description: MCP_TOOL_DESCRIPTIONS.outline,
 		inputSchema: z.object({ sourcePath: z.string().min(1), release: z.string().optional() }),
-		annotations: { readOnlyHint: true, idempotentHint: true },
+		annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 	}, async ({ sourcePath, release }) => result(context.getDocumentOutline(sourcePath, release)));
 
 	server.registerTool("list_servicenow_publications", {
 		title: "List ServiceNow publications",
 		description: MCP_TOOL_DESCRIPTIONS.publications,
 		inputSchema: z.object({ release: z.string().optional() }),
-		annotations: { readOnlyHint: true, idempotentHint: true },
+		annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 	}, async ({ release }) => result(context.listPublications(release)));
 
 	server.registerTool("get_documentation_search_status", {
 		title: "Get DocumentationSearch status",
 		description: MCP_TOOL_DESCRIPTIONS.status,
 		inputSchema: z.object({}),
-		annotations: { readOnlyHint: true, idempotentHint: true },
+		annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 	}, async () => result(context.status()));
 
 	server.registerTool("update_servicenow_docs", {
@@ -96,8 +156,17 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 			limit: z.number().int().positive().optional(),
 			concurrency: z.number().int().min(1).max(64).optional(),
 		}),
-		annotations: { readOnlyHint: false, idempotentHint: true },
-	}, async (options) => result(await context.update(options)));
+		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+	}, async (options, extra) => {
+		const progressToken = extra._meta?.progressToken;
+		let progress = 0;
+		// Indexing a full family takes a long time; progress notifications keep clients informed and their request timers reset.
+		const onProgress = progressToken === undefined ? undefined : (message: string) => {
+			progress += 1;
+			void extra.sendNotification({ method: "notifications/progress", params: { progressToken, progress, message } }).catch(() => undefined);
+		};
+		return result(await context.update({ ...options, onProgress }));
+	});
 
 	const shutdown = async () => {
 		context.close();
@@ -106,6 +175,8 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 	process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
 	process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
 	await server.connect(new StdioServerTransport());
+	// Loads the query model and the in-memory vector index in the background so the first search is fast.
+	if (context.database.stats().chunks) void context.warmUp().catch((error: unknown) => console.error(`Warm-up failed: ${error instanceof Error ? error.message : String(error)}`));
 }
 
 const invokedDirectly = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];

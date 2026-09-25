@@ -45,10 +45,12 @@
     "build": "tsup",
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "prepublishOnly": "npm run check && npm test && npm run build"
+    "prepublishOnly": "npm run check && npm test && npm run build",
+    "eval:retrieval": "npm run build && node scripts/eval-retrieval.ts",
+    "bench:indexing": "npm run build && node scripts/bench-indexing.ts"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.2.0",
+    "@huggingface/transformers": "^4.3.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^15.0.0",
     "sqlite-vec": "^0.1.9",

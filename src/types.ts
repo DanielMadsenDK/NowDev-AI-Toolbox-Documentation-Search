@@ -34,6 +34,8 @@ export interface DocumentChunk {
   lastUpdated: string | null;
   objectName: string | null;
   methodName: string | null;
+  /** Breadcrumb and heading path indexed as a weighted full-text column; not part of the returned content. */
+  context?: string | null;
   metadata: Record<string, unknown>;
   contentHash: string;
 }
@@ -51,6 +53,8 @@ export interface SearchOptions extends SearchFilters {
   threshold?: number;
   deduplicateReleases?: boolean;
   maxResultsPerSource?: number;
+  /** Rerank the top fused candidates with the configured cross-encoder (default: false). Improves some how-to and glossary queries at several hundred milliseconds of CPU time per search. */
+  rerank?: boolean;
 }
 
 export interface SearchResult extends DocumentChunk {
@@ -85,6 +89,8 @@ export interface UpdateResult {
   changed: number;
   deleted: number;
   chunks: number;
+  /** Chunks whose vectors were reused from the embedding cache instead of being embedded. */
+  cachedChunks: number;
   failures: IndexFailure[];
 }
 

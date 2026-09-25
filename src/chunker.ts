@@ -81,11 +81,49 @@ export function parseFrontmatter(markdown: string): [Frontmatter, string] {
   return [metadata ?? {}, markdown.slice(match[0].length)];
 }
 
+// The docs converter glues fences to the end of lines, and markdown only recognizes a fence at the start of a line, so
+// an unrepaired glued fence flips every later fence and turns the rest of the page, method headings included, into
+// code. Two shapes occur: an opening fence after prose ("button click.```"), and a closing fence after the last line of
+// code, often followed by the same closing fence again on its own line. Repairing both the same way left the duplicate
+// opening a block that never closed, which hid 89 of GlideDateTime's 151 method headings (Global and Scoped). So the
+// repair follows the fence state: outside a block a glued fence opens one on its own line; inside a block it closes
+// it, and is dropped when the next non-blank line already closes it.
+function repairGluedFences(markdown: string): string {
+  const lines = markdown.split("\n");
+  const output: string[] = [];
+  let inCode = false;
+  lines.forEach((line, index) => {
+    if (line.trim().startsWith("```")) {
+      inCode = !inCode;
+      output.push(line);
+      return;
+    }
+    const glued = line.match(/^(.*[^`\s])[ \t]*(```[\w+-]*)[ \t]*$/);
+    if (!glued) {
+      output.push(line);
+      return;
+    }
+    output.push(glued[1]!);
+    if (!inCode) {
+      output.push(glued[2]!);
+      inCode = true;
+      return;
+    }
+    const next = lines.slice(index + 1).find((candidate) => candidate.trim() !== "");
+    if (next?.trim() === "```") return;
+    output.push("```");
+    inCode = false;
+  });
+  return output.join("\n");
+}
+
 function normalizeMarkdown(markdown: string): string {
-  return markdown
+  return repairGluedFences(markdown
     .replaceAll("\r\n", "\n")
     .replaceAll("\\(", "(")
     .replaceAll("\\)", ")")
+    // ServiceNowDocs escapes identifiers and brackets (sys\_id, g\_form, \[Omitted image\]); the escapes split identifiers for both the tokenizer and embeddings.
+    .replace(/\\([_[\]*#])/g, "$1"))
     .replace(/<\/table>(?=\|)/g, "</table>\n")
     .replace(/<\/table>(?=\S)/g, "</table>\n\n")
     .replace(/\n{3,}/g, "\n\n")
@@ -195,6 +233,70 @@ function parseHtmlTables(section: string): ParsedTable[] {
     if (rows.length) tables.push({ headers, rows });
   }
   return tables;
+}
+
+function decodeEntities(value: string): string {
+  return value
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+// Renders an HTML table as one line per row ("Header: value; Header: value"), so embedded and indexed text carries
+// the cell content without markup. Rows without a header row fall back to " | "-joined cells.
+function renderHtmlTable(tableHtml: string): string {
+  let headers: string[] = [];
+  const lines: string[] = [];
+  for (const rowMatch of tableHtml.matchAll(HTML_ROW)) {
+    const cells = [...(rowMatch[1] ?? "").matchAll(HTML_CELL)];
+    if (!cells.length) continue;
+    const values = cells.map((cell) => cleanCell(cell[2] ?? ""));
+    if (cells.every((cell) => cell[1]!.toLowerCase() === "th")) {
+      headers = values;
+      continue;
+    }
+    lines.push(headers.length === values.length
+      ? values.map((value, index) => value ? `${headers[index]}: ${value}` : "").filter(Boolean).join("; ")
+      : values.filter(Boolean).join(" | "));
+  }
+  return lines.filter(Boolean).join("\n");
+}
+
+// Text fed to the embedding model and the full-text index for topic documents. The stored source keeps the original
+// markdown for get/outline; this only removes markup that costs model tokens without carrying meaning.
+export function searchableText(markdown: string): string {
+  return decodeEntities(markdown
+    .replace(HTML_TABLE, (table) => `\n${renderHtmlTable(table)}\n`)
+    .replace(/\[Omitted image[^\]]*\](?:\s*Alt text:[^\n]*)?/g, "")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/<\/?(?:div|p|span|br|b|i|strong|em|sup|sub|ul|ol|li|dl|dt|dd|section|aside)\b[^>]*>/gi, " ")
+    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+    .replace(/^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-*:?\s*\|?\s*$/gm, ""))
+    .replace(/[ \t]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function unescapeMarkdown(value: string): string {
+  return value.replace(/\\([()_[\]*#])/g, "$1");
+}
+
+function breadcrumbPath(frontmatter: Frontmatter): string | null {
+  const items = Array.isArray(frontmatter.breadcrumb) ? frontmatter.breadcrumb.filter((item): item is string => typeof item === "string" && item.trim() !== "") : [];
+  // Breadcrumbs are unquoted YAML flow sequences, so a title such as "Forms, fields, and lists" arrives as three items.
+  // Titles are capitalized, so an item starting in lowercase continues the previous one.
+  const breadcrumb: string[] = [];
+  for (const item of items.map((value) => unescapeMarkdown(value.trim()))) {
+    if (breadcrumb.length && /^[a-z]/.test(item)) breadcrumb[breadcrumb.length - 1] += `, ${item}`;
+    else breadcrumb.push(item);
+  }
+  // ServiceNowDocs lists the nearest parent first; the path reads from the root down.
+  return breadcrumb.length ? breadcrumb.reverse().join(" > ") : null;
 }
 
 function conciseText(value: string): string {
@@ -356,7 +458,6 @@ function apiContent(label: string, objectName: string, methodName: string | null
     `Object: ${objectName}`,
     methodName ? `Method: ${methodName}` : null,
     signature ? `Signature: ${signature}` : null,
-    `Release: ${release}`,
     detail ? `${label}: ${detail}` : null,
     `Keywords: ${identifierKeywords(objectName, methodName)}`,
   ].filter(Boolean).join("\n");
@@ -372,6 +473,7 @@ function chunkApiDoc(sourcePath: string, markdown: string, branch: string, famil
   const hash = contentHash(markdown);
   const titleObject = extractObjectName(title, sourcePath, docType);
   const scopes = extractScopes(title, body);
+  const breadcrumb = breadcrumbPath(frontmatter);
   const metadataBase = {
     ...frontmatter,
     title,
@@ -409,6 +511,7 @@ function chunkApiDoc(sourcePath: string, markdown: string, branch: string, famil
     lastUpdated: nullable(frontmatter.last_updated),
     objectName: titleObject,
     methodName: null,
+    context: breadcrumb,
     metadata: { ...metadataBase, full_content: body },
     contentHash: hash,
   }];
@@ -451,6 +554,7 @@ function chunkApiDoc(sourcePath: string, markdown: string, branch: string, famil
       lastUpdated: nullable(frontmatter.last_updated),
       objectName: position.objectName,
       methodName,
+      context: [breadcrumb, identifierKeywords(position.objectName, methodName)].filter(Boolean).join(" > "),
       metadata: { ...metadata, section: chunkType },
       contentHash: hash,
     });
@@ -458,8 +562,12 @@ function chunkApiDoc(sourcePath: string, markdown: string, branch: string, famil
       const contents = splitApiContent(label, position.objectName, methodName, position.signature, release, detail, maxCharacters);
       contents.forEach((content, partIndex) => append(chunkType, content, contents.length > 1 ? { ...metadata, chunk_part: partIndex + 1 } : metadata));
     };
-    const { full_content: _fullContent, ...focusedMetadata } = methodMetadata;
-    appendDetail(docType === "rest-api" ? "endpoint" : "method", "Summary", summary, methodMetadata);
+    // Parameter/returns/example chunks each carry their own item; repeating every sibling array in each of them dominated index size.
+    const { full_content: _fullContent, parameters: _parameters, returns: _returns, examples: _examples, ...focusedMetadata } = methodMetadata;
+    const parameterList = parameters.map((parameter) => [parameter.name, parameter.type].filter(Boolean).join(": ")).filter(Boolean).join(", ");
+    const returnList = returns.map((result) => result.type ?? result.property ?? result.properties ?? "").filter(Boolean).join(", ");
+    const methodDetail = [summary, parameterList ? `Parameters: ${parameterList}.` : null, returnList ? `Returns: ${returnList}.` : null].filter(Boolean).join(" ");
+    appendDetail(docType === "rest-api" ? "endpoint" : "method", "Summary", methodDetail, methodMetadata);
     parameters.forEach((parameter) => appendDetail("parameter", "Parameter", `${parameter.name}: ${parameter.type}. ${parameter.description ?? ""}`.trim(), { ...focusedMetadata, parameter }));
     returns.forEach((result) => appendDetail("returns", "Returns", `${result.type ?? result.property ?? result.properties ?? ""}: ${result.description ?? ""}`.trim(), { ...focusedMetadata, return: result }));
     examples.forEach((example, exampleIndex) => appendDetail("example", "Example", example, { ...focusedMetadata, example, example_index: exampleIndex + 1 }));
@@ -489,7 +597,18 @@ function chunkTopicDoc(sourcePath: string, markdown: string, branch: string, fam
   const metadata = baseTopicMetadata(sourcePath, frontmatter, branch, family, title, release);
   const lines = body.split("\n");
   const inCodeFence = codeFenceMask(lines);
-  const headings = lines.flatMap((line, index) => !inCodeFence[index] && line.trim().startsWith("## ") ? [{ heading: line.trim().slice(3).trim(), index }] : []);
+  // H2 and H3 both start sections; an H3 section's heading path keeps its parent H2 for context.
+  const headings: Array<{ heading: string; path: string; level: number; index: number }> = [];
+  let parent: string | null = null;
+  lines.forEach((line, index) => {
+    if (inCodeFence[index]) return;
+    const match = line.trim().match(/^(#{2,3})\s+(.+?)\s*$/);
+    if (!match) return;
+    const level = match[1]!.length;
+    const heading = match[2]!;
+    if (level === 2) parent = heading;
+    headings.push({ heading, path: level === 3 && parent ? `${parent} > ${heading}` : heading, level, index });
+  });
   const firstHeading = headings[0]?.index ?? lines.length;
   const common = {
     docType: classifyDocType(sourcePath), publication: publicationFromPath(sourcePath), sourcePath, release,
@@ -497,18 +616,26 @@ function chunkTopicDoc(sourcePath: string, markdown: string, branch: string, fam
     classification: nullable(frontmatter.classification), lastUpdated: nullable(frontmatter.last_updated),
     objectName: null, methodName: null, contentHash: contentHash(markdown),
   } as const;
-  const contentPrefix = (heading?: string) => [
+  const breadcrumb = breadcrumbPath(frontmatter);
+  const context = (headingPath?: string) => [breadcrumb, headingPath].filter(Boolean).join(" > ") || null;
+  const description = conciseText(unescapeMarkdown(decodeEntities(text(frontmatter.description))));
+  const contentPrefix = (headingPath?: string, includeDescription = false) => [
     `Title: ${title}`,
-    heading ? `Section: ${heading}` : null,
+    breadcrumb ? `Path: ${breadcrumb}` : null,
+    headingPath ? `Section: ${headingPath}` : null,
     text(frontmatter.product) ? `Product: ${text(frontmatter.product)}` : null,
-    `Release: ${release}`,
+    includeDescription && description ? `Summary: ${description}` : null,
   ].filter(Boolean).join("\n");
-  const overviewBody = lines.slice(0, firstHeading).join("\n").trim();
-  const chunks: DocumentChunk[] = splitTopicContent(contentPrefix(), overviewBody, maxCharacters).map((content, index) => ({ ...common, chunkType: "overview", chunkIndex: index, heading: null, content, metadata: { ...metadata, full_content: body } }));
+  const overviewBody = searchableText(lines.slice(0, firstHeading).filter((line) => !/^#\s/.test(line.trim())).join("\n"));
+  // The first paragraph usually repeats the frontmatter description; drop it rather than spend tokens twice.
+  const overviewText = description && overviewBody.startsWith(description) ? overviewBody.slice(description.length).trim() : overviewBody;
+  const chunks: DocumentChunk[] = splitTopicContent(contentPrefix(undefined, true), overviewText, maxCharacters).map((content, index) => ({ ...common, chunkType: "overview", chunkIndex: index, heading: null, content, context: context(), metadata: { ...metadata, full_content: body } }));
   headings.forEach((item, index) => {
     const end = headings[index + 1]?.index ?? lines.length;
-    const sectionBody = lines.slice(item.index + 1, end).join("\n").trim();
-    splitTopicContent(contentPrefix(item.heading), sectionBody, maxCharacters).forEach((content) => chunks.push({ ...common, chunkType: "section", chunkIndex: chunks.length, heading: item.heading, content, metadata: { ...metadata, section_content: lines.slice(item.index, end).join("\n").trim() } }));
+    const sectionBody = searchableText(lines.slice(item.index + 1, end).join("\n"));
+    // A heading that only introduces its subsections adds a chunk with no content of its own.
+    if (!sectionBody && headings[index + 1]?.level === 3 && item.level === 2) return;
+    splitTopicContent(contentPrefix(item.path), sectionBody, maxCharacters).forEach((content) => chunks.push({ ...common, chunkType: "section", chunkIndex: chunks.length, heading: item.heading, content, context: context(item.path), metadata: { ...metadata, ...(item.level === 3 ? { heading_path: item.path } : {}), section_content: lines.slice(item.index, end).join("\n").trim() } }));
   });
   return chunks;
 }
@@ -526,11 +653,11 @@ function chunkGlossary(sourcePath: string, markdown: string, branch: string, fam
     topicType: "reference", product: "ServiceNow AI Platform", classification: "glossary",
     lastUpdated: nullable(frontmatter.last_updated), objectName: null, methodName: null, contentHash: contentHash(markdown),
   };
-  if (!terms.length) return [{ ...common, chunkType: "overview", chunkIndex: 0, heading: null, content: `Title: ${title}\nProduct: ServiceNow AI Platform\nRelease: ${release}\n\n${body}`, metadata: { source_path: sourcePath, url: rawUrl(branch, sourcePath), release, family, full_content: body } }];
+  if (!terms.length) return [{ ...common, chunkType: "overview", chunkIndex: 0, heading: null, content: `Title: ${title}\nProduct: ServiceNow AI Platform\n\n${searchableText(body)}`, metadata: { source_path: sourcePath, url: rawUrl(branch, sourcePath), release, family, full_content: body } }];
   return terms.map((item, index) => {
     const end = terms[index + 1]?.index ?? lines.length;
-    const definition = lines.slice(item.index + 1, end).map((line) => line.trim()).filter((line) => line && !line.startsWith("## ")).join(" ");
-    return { ...common, chunkType: "definition", chunkIndex: index, heading: item.term, content: `Term: ${item.term}\nDefinition: ${definition}\nProduct: ServiceNow AI Platform\nRelease: ${release}`, metadata: { term: item.term, definition, source_path: sourcePath, url: rawUrl(branch, sourcePath), release, family } };
+    const definition = searchableText(lines.slice(item.index + 1, end).map((line) => line.trim()).filter((line) => line && !line.startsWith("## ")).join(" "));
+    return { ...common, chunkType: "definition", chunkIndex: index, heading: item.term, content: `Term: ${item.term}\nDefinition: ${definition}\nProduct: ServiceNow AI Platform`, metadata: { term: item.term, definition, source_path: sourcePath, url: rawUrl(branch, sourcePath), release, family } };
   });
 }
 

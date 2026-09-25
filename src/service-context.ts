@@ -1,9 +1,11 @@
 import { chunkDocument, contentHash } from "./chunker.js";
 import { DEFAULT_FAMILY, DEFAULT_MAX_EMBEDDING_CHARACTERS, resolvePaths, SEARCH_SCHEMA_VERSION, type DocumentationSearchPaths } from "./config.js";
-import { DocumentationSearchDatabase, readStoredDimensions, readStoredEmbeddingProfile } from "./database.js";
+import { DocumentationSearchDatabase, readStoredDimensions, readStoredEmbeddingDtype, readStoredEmbeddingProfile } from "./database.js";
+import { EmbeddingCache, embeddingCacheSize, embeddingTextHash } from "./embedding-cache.js";
 import { DEFAULT_EMBEDDING_PROFILE, embeddingProfile, isEmbeddingProfileName, type EmbeddingProfileName } from "./embedding-profiles.js";
-import { EndpointDocumentEmbeddingProvider, TransformersEmbeddingProvider, type EmbeddingBatch, type EmbeddingDevice, type EmbeddingProvider, type TransformersEmbeddingOptions } from "./embedder.js";
+import { EndpointDocumentEmbeddingProvider, isEmbeddingDtype, TransformersEmbeddingProvider, type EmbeddingBatch, type EmbeddingDevice, type EmbeddingProvider, type TransformersEmbeddingOptions } from "./embedder.js";
 import { GitHubDocumentationSource, type DocumentationArea, type SourceEntry } from "./github.js";
+import { rerankPassage, TransformersReranker, type Reranker } from "./reranker.js";
 import type { DocumentChunk, IndexFailure, IndexManifest, SearchOptions, SearchResult, UpdateResult } from "./types.js";
 
 export interface DocumentationSearchOptions {
@@ -13,6 +15,8 @@ export interface DocumentationSearchOptions {
   embeddingBatchSize?: number;
   embeddingMaxCharacters?: number;
   embeddingThreads?: number;
+  /** Worker threads for bulk CPU document embedding (default: min(embeddingThreads, 8)); 1 embeds in-process. */
+  embeddingWorkers?: number;
   embeddingProfile?: EmbeddingProfileName;
   embeddingDimensions?: number;
   embeddingEndpoint?: string;
@@ -23,6 +27,11 @@ export interface DocumentationSearchOptions {
   embeddingEndpointTimeoutMilliseconds?: number;
   vectorOversample?: number;
   embeddingProvider?: EmbeddingProvider;
+  /** Reuse document vectors from the persistent embedding cache. Defaults to true, except with a custom embeddingProvider whose identity may not be stable. */
+  embeddingCache?: boolean;
+  /** Cross-encoder used to rerank the top fused candidates. Defaults to a local Transformers.js reranker, except with a custom embeddingProvider; pass false to disable. */
+  reranker?: Reranker | false;
+  rerankerModel?: string;
   source?: GitHubDocumentationSource;
 }
 
@@ -86,6 +95,8 @@ interface ParsedSource {
 
 interface PreparedSource extends ParsedSource {
   embeddings: Float32Array[];
+  /** Every vector came from the embedding cache, so there is nothing new to store in it. */
+  fromCache?: boolean;
 }
 
 interface EmbeddingState {
@@ -96,6 +107,17 @@ interface EmbeddingState {
 
 type ParseResult = { parsed: ParsedSource; failure?: never } | { parsed?: never; failure: IndexFailure };
 type ParseBatchOutcome = { ok: true; results: ParseResult[] } | { ok: false; error: unknown };
+
+// Fused candidates scored by the cross-encoder. Deeper pools cost roughly linear reranking time for little recall gain.
+const RERANK_DEPTH = 30;
+// Share of the final score taken from the cross-encoder; the rest keeps the fused rank's exact-identifier and keyword evidence.
+const RERANK_WEIGHT = 0.7;
+
+const QUERY_EMBEDDING_CACHE_SIZE = 256;
+
+function sigmoid(value: number): number {
+  return 1 / (1 + Math.exp(-value));
+}
 
 function failureMessage(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
@@ -109,6 +131,9 @@ export class DocumentationSearch {
   readonly embeddingProfileName: EmbeddingProfileName | null;
   readonly source: GitHubDocumentationSource;
   readonly database: DocumentationSearchDatabase;
+  readonly reranker: Reranker | null;
+  readonly embeddingCacheEnabled: boolean;
+  private readonly queryEmbeddings = new Map<string, Promise<Float32Array>>();
 
   constructor(options: DocumentationSearchOptions = {}) {
     this.paths = resolvePaths(options.dataDirectory);
@@ -134,14 +159,24 @@ export class DocumentationSearch {
         throw new Error(`--embedding-dimensions must be between ${profile.minDimensions} and ${profile.dimensions} for ${selectedProfile}.`);
       }
     }
+    const storedDtype = options.embeddingProvider ? null : readStoredEmbeddingDtype(this.paths.database);
+    if (storedDtype && !isEmbeddingDtype(storedDtype)) {
+      throw new Error(`Index uses unknown embedding dtype ${storedDtype}. Upgrade DocumentationSearch or use a supported index.`);
+    }
+    // Like the dimension count, a stored dtype only applies to the profile that wrote it. A new index built on a GPU
+    // defaults to fp16: the q8 model's dynamically quantized operators run slower on WebGPU than on the CPU.
+    const selectedDtype = options.embeddingDtype
+      ?? (storedProfile === selectedProfile && storedDtype && isEmbeddingDtype(storedDtype) ? storedDtype : undefined)
+      ?? (options.embeddingDevice === "webgpu" ? "fp16" : undefined);
     const localEmbeddings = options.embeddingProvider ?? new TransformersEmbeddingProvider({
       ...profile,
       cacheDirectory: this.paths.models,
       device: options.embeddingDevice,
-      dtype: options.embeddingDtype,
+      dtype: selectedDtype,
       batchSize: options.embeddingBatchSize,
       ...(options.embeddingMaxCharacters === undefined ? {} : { maxEmbeddingCharacters: options.embeddingMaxCharacters }),
       threads: options.embeddingThreads,
+      workers: options.embeddingWorkers,
       dimensions: selectedDimensions,
     });
     this.embeddings = options.embeddingEndpoint ? new EndpointDocumentEmbeddingProvider(localEmbeddings, {
@@ -152,6 +187,10 @@ export class DocumentationSearch {
       concurrency: options.embeddingEndpointConcurrency,
       timeoutMilliseconds: options.embeddingEndpointTimeoutMilliseconds,
     }) : localEmbeddings;
+    this.reranker = options.reranker === false
+      ? null
+      : options.reranker ?? (options.embeddingProvider ? null : new TransformersReranker({ model: options.rerankerModel, cacheDirectory: this.paths.models, threads: options.embeddingThreads }));
+    this.embeddingCacheEnabled = options.embeddingCache ?? !options.embeddingProvider;
     this.source = options.source ?? new GitHubDocumentationSource({ repositoryDirectory: this.paths.repository });
     this.database = new DocumentationSearchDatabase(this.paths.database, this.embeddings.dimensions, options.vectorOversample);
     if (!options.embeddingProvider) {
@@ -161,6 +200,13 @@ export class DocumentationSearch {
         throw new Error(`Index uses embedding profile ${activeProfile}, but ${selectedProfile} was selected. Use --embedding-profile ${activeProfile}, a separate data directory, or reset the index.`);
       }
       this.database.setEmbeddingProfile(selectedProfile);
+      // Stored immediately, like the profile, so an interrupted first build cannot resume with other vectors.
+      const activeDtype = this.database.embeddingDtype();
+      if (activeDtype && activeDtype !== localEmbeddings.dtype) {
+        this.database.close();
+        throw new Error(`Index uses embedding dtype ${activeDtype}, but ${localEmbeddings.dtype} was selected. Omit --embedding-dtype to use the index's dtype, or use a separate data directory or reset the index.`);
+      }
+      if (localEmbeddings.dtype) this.database.setEmbeddingDtype(localEmbeddings.dtype);
     }
     const manifest = this.database.manifest();
     if (manifest && manifest.schemaVersion !== SEARCH_SCHEMA_VERSION) {
@@ -186,6 +232,36 @@ export class DocumentationSearch {
 
   close(): void {
     this.database.close();
+    void this.embeddings.dispose?.();
+  }
+
+  /**
+   * Loads the query embedding model and the in-memory vector index ahead of the first search. Long-running hosts such
+   * as the MCP server call this at startup; one-shot CLI searches skip it because loading costs more than it saves.
+   */
+  async warmUp(options: { rerank?: boolean } = {}): Promise<void> {
+    await Promise.all([
+      this.embedQuery("warm up"),
+      this.database.warmUp(),
+      options.rerank && this.reranker?.warmUp ? this.reranker.warmUp() : Promise.resolve(),
+    ]);
+  }
+
+  private embedQuery(query: string): Promise<Float32Array> {
+    // Agents often repeat or retry the same query; a small LRU avoids re-running the model for it.
+    const cached = this.queryEmbeddings.get(query);
+    if (cached) {
+      this.queryEmbeddings.delete(query);
+      this.queryEmbeddings.set(query, cached);
+      return cached;
+    }
+    const embedding = this.embeddings.embedQuery
+      ? this.embeddings.embedQuery(query)
+      : this.embeddings.embed([query]).then((vectors) => vectors[0]!);
+    this.queryEmbeddings.set(query, embedding);
+    void embedding.catch(() => this.queryEmbeddings.delete(query));
+    if (this.queryEmbeddings.size > QUERY_EMBEDDING_CACHE_SIZE) this.queryEmbeddings.delete(this.queryEmbeddings.keys().next().value!);
+    return embedding;
   }
 
   async update(options: UpdateOptions = {}): Promise<UpdateResult> {
@@ -200,9 +276,13 @@ export class DocumentationSearch {
     const branch = options.branch ?? family;
     const area = options.area ?? "all-docs";
     const progress = options.onProgress ?? (() => undefined);
+    if (this.embeddings.device === "webgpu" && this.embeddings.dtype === "q8") {
+      progress("This index uses q8 embeddings, which run slower on WebGPU than on the CPU. For GPU indexing, build a separate fp16 index (a new data directory with --device webgpu).");
+    }
     progress(`Discovering ${family} documentation...`);
     const tree = await this.source.discover(branch, area);
     const entries = options.limit ? tree.entries.slice(0, options.limit) : tree.entries;
+    const vectorIndexWasLoaded = this.database.vectorIndexLoaded;
     const current = this.database.sourceMap(family);
     const remotePaths = new Set(entries.map((entry) => entry.path));
     const deleted = options.limit ? [] : [...current.keys()].filter((sourcePath) => !remotePaths.has(sourcePath));
@@ -263,9 +343,14 @@ export class DocumentationSearch {
     const failures: IndexFailure[] = [];
     const prepared: Array<{ path: string; chunkCount: number }> = [];
     const committedPaths = new Set<string>();
+    // Opened per update rather than per context, so search-only processes never create the file or hold it open.
+    const cache = changed.length && this.embeddingCacheEnabled ? EmbeddingCache.open(this.paths.embeddingCache, manifest, progress) : undefined;
+    let cachedChunks = 0;
     const commit = (sources: PreparedSource[]): void => {
       if (!sources.length) return;
       this.database.replaceSources(family, sources, [], manifest);
+      // After the index write: the cache is only an optimization, so a failure here must not cost the document.
+      cache?.store(sources.filter((source) => !source.fromCache).flatMap((source) => source.chunks.map((chunk, index) => ({ hash: embeddingTextHash(chunk.content), vector: source.embeddings[index]! }))));
       for (const source of sources) {
         prepared.push({ path: source.path, chunkCount: source.chunks.length });
         committedPaths.add(source.path);
@@ -306,22 +391,50 @@ export class DocumentationSearch {
       }
     };
     const embedGroup = async (group: ParsedSource[]): Promise<void> => {
-      const groupChunks = group.flatMap((source) => source.chunks);
-      if (!groupChunks.length) return;
-      // Scoped per group (not the whole corpus): once a group finishes, its states/locations become garbage, and every document in it has committed, however the corpus-wide length sort inside embedBatched reordered this group's chunks.
+      if (!group.some((source) => source.chunks.length)) return;
+      // Scoped per group (not the whole corpus): once a group finishes, its states/targets become garbage, and every document in it has committed, however the length sort inside embedBatched reordered this group's chunks.
       const states = group.map<EmbeddingState>((source) => ({ source, embeddings: new Array(source.chunks.length), completed: 0 }));
-      const locations = states.flatMap((state) => state.source.chunks.map((_, index) => ({ state, index })));
+      const cached = cache?.lookup(states.flatMap((state) => state.source.chunks.map((chunk) => embeddingTextHash(chunk.content)))) ?? [];
+      // The model only sees uncached passages, each distinct text once; `targets` fans every vector out to all chunks sharing its text.
+      const texts: string[] = [];
+      const targets: Array<Array<{ state: EmbeddingState; index: number }>> = [];
+      const textPositions = new Map<string, number>();
+      let position = 0;
+      for (const state of states) {
+        state.source.chunks.forEach((chunk, index) => {
+          const vector = cached[position++];
+          if (vector) {
+            state.embeddings[index] = vector;
+            state.completed += 1;
+            cachedChunks += 1;
+            return;
+          }
+          const existing = textPositions.get(chunk.content);
+          if (existing !== undefined) {
+            targets[existing]!.push({ state, index });
+            return;
+          }
+          textPositions.set(chunk.content, texts.length);
+          texts.push(chunk.content);
+          targets.push([{ state, index }]);
+        });
+      }
+      commit(states
+        .filter((state) => state.source.chunks.length && state.completed === state.source.chunks.length)
+        .map((state) => ({ ...state.source, embeddings: state.embeddings as Float32Array[], fromCache: true })));
+      if (!texts.length) return;
       const acceptBatch = async (batch: EmbeddingBatch): Promise<void> => {
         const completedSources: PreparedSource[] = [];
-        batch.indexes.forEach((groupIndex, batchIndex) => {
-          const location = locations[groupIndex];
+        batch.indexes.forEach((textIndex, batchIndex) => {
+          const locations = targets[textIndex];
           const vector = batch.vectors[batchIndex];
-          if (!location || !vector || location.state.embeddings[location.index]) throw new Error(`Invalid embedding batch index ${groupIndex}`);
-          location.state.embeddings[location.index] = vector;
-          location.state.completed += 1;
-          overallCompleted += 1;
-          if (location.state.completed === location.state.source.chunks.length) {
-            completedSources.push({ ...location.state.source, embeddings: location.state.embeddings as Float32Array[] });
+          if (!locations || !vector) throw new Error(`Invalid embedding batch index ${textIndex}`);
+          for (const { state, index } of locations) {
+            if (state.embeddings[index]) throw new Error(`Invalid embedding batch index ${textIndex}`);
+            state.embeddings[index] = vector;
+            state.completed += 1;
+            overallCompleted += 1;
+            if (state.completed === state.source.chunks.length) completedSources.push({ ...state.source, embeddings: state.embeddings as Float32Array[] });
           }
         });
         commit(completedSources);
@@ -329,18 +442,14 @@ export class DocumentationSearch {
       };
       try {
         if (this.embeddings.embedBatched) {
-          await this.embeddings.embedBatched(groupChunks.map((chunk) => chunk.content), acceptBatch);
+          await this.embeddings.embedBatched(texts, acceptBatch);
         } else {
-          const groupEmbeddings = await this.embeddings.embed(groupChunks.map((chunk) => chunk.content));
-          let offset = 0;
-          for (const source of group) {
-            const embeddings = groupEmbeddings.slice(offset, offset + source.chunks.length);
-            commit([{ ...source, embeddings }]);
-            overallCompleted += source.chunks.length;
-            offset += source.chunks.length;
-          }
-          reportOverallProgress();
+          const vectors = await this.embeddings.embed(texts);
+          if (vectors.length !== texts.length) throw new Error(`Embedding count mismatch: ${vectors.length} vectors for ${texts.length} passages`);
+          await acceptBatch({ indexes: vectors.map((_, index) => index), vectors, completed: vectors.length, total: vectors.length });
         }
+        // A provider that resolves without delivering every vector would otherwise leave its documents silently uncommitted.
+        if (states.some((state) => state.completed < state.source.chunks.length)) throw new Error("Embedding provider returned fewer vectors than passages");
       } catch (batchError) {
         progress(`Shared embedding pass failed for a group (${failureMessage(batchError)}); retrying its documents individually...`);
         for (const source of group) {
@@ -363,26 +472,32 @@ export class DocumentationSearch {
     // (CPU-bound) use disjoint resources, so overlapping them hides one phase's latency behind the other's instead
     // of paying for both in sequence. Only ever one batch ahead, so memory stays bounded for large corpora.
     let nextBatch = changed.length ? startParseBatch(changed.slice(0, PREPARATION_SOURCE_BATCH_SIZE)) : undefined;
-    for (let offset = 0; offset < changed.length; offset += PREPARATION_SOURCE_BATCH_SIZE) {
-      const outcome = await nextBatch!;
-      if (!outcome.ok) throw outcome.error;
-      const nextOffset = offset + PREPARATION_SOURCE_BATCH_SIZE;
-      nextBatch = nextOffset < changed.length ? startParseBatch(changed.slice(nextOffset, nextOffset + PREPARATION_SOURCE_BATCH_SIZE)) : undefined;
-      const parsed = outcome.results.flatMap((result) => result.parsed ? [result.parsed] : []);
-      failures.push(...outcome.results.flatMap((result) => result.failure ? [result.failure] : []));
-      if (parsed.some((source) => source.chunks.length)) progress(`Embedding prepared chunks through ${processed}/${changed.length} sources...`);
-      for (const group of groupSources(parsed, EMBEDDING_GROUP_CHUNK_TARGET)) await embedGroup(group);
+    try {
+      for (let offset = 0; offset < changed.length; offset += PREPARATION_SOURCE_BATCH_SIZE) {
+        const outcome = await nextBatch!;
+        if (!outcome.ok) throw outcome.error;
+        const nextOffset = offset + PREPARATION_SOURCE_BATCH_SIZE;
+        nextBatch = nextOffset < changed.length ? startParseBatch(changed.slice(nextOffset, nextOffset + PREPARATION_SOURCE_BATCH_SIZE)) : undefined;
+        const parsed = outcome.results.flatMap((result) => result.parsed ? [result.parsed] : []);
+        failures.push(...outcome.results.flatMap((result) => result.failure ? [result.failure] : []));
+        if (parsed.some((source) => source.chunks.length)) progress(`Embedding prepared chunks through ${processed}/${changed.length} sources...`);
+        for (const group of groupSources(parsed, EMBEDDING_GROUP_CHUNK_TARGET)) await embedGroup(group);
+      }
+    } finally {
+      cache?.close();
     }
     if (overallCompleted) progress(`Embedded ${overallCompleted} chunks.`);
-    if (this.embeddings.metrics && (this.embeddings.metrics.retries || this.embeddings.metrics.truncations || this.embeddings.metrics.batchSplits || this.embeddings.metrics.deviceTransitions)) {
+    if (cachedChunks) progress(`Reused ${cachedChunks} cached embeddings.`);
+    if (this.embeddings.metrics && (this.embeddings.metrics.retries || this.embeddings.metrics.truncations || this.embeddings.metrics.batchSplits || this.embeddings.metrics.deviceTransitions || this.embeddings.metrics.workerFallbacks)) {
       const metrics = this.embeddings.metrics;
-      progress(`Embedding adjustments: ${metrics.retries} retries, ${metrics.truncations} truncations, ${metrics.batchSplits} batch splits, ${metrics.deviceTransitions} device transitions.`);
+      progress(`Embedding adjustments: ${metrics.retries} retries, ${metrics.truncations} truncations, ${metrics.batchSplits} batch splits, ${metrics.deviceTransitions} device transitions, ${metrics.workerFallbacks} worker fallbacks.`);
     }
     if (failures.length) progress(`Completed with ${failures.length} failed document${failures.length === 1 ? "" : "s"}; see the failures list in the result.`);
     if (deleted.length) this.database.replaceSources(family, [], deleted, manifest);
     if (prepared.length || deleted.length) {
       progress("Optimizing the full-text search index...");
       this.database.optimizeSearchIndex();
+      if (vectorIndexWasLoaded) await this.database.warmUp();
     }
     this.database.setManifest(manifest);
     const addedCount = prepared.filter((source) => !current.has(source.path)).length;
@@ -394,6 +509,7 @@ export class DocumentationSearch {
       changed: changedCount,
       deleted: deleted.length,
       chunks: prepared.reduce((total, item) => total + item.chunkCount, 0),
+      cachedChunks,
       failures,
     };
   }
@@ -406,10 +522,17 @@ export class DocumentationSearch {
     if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error("limit must be an integer between 1 and 50");
     if (!Number.isFinite(threshold) || threshold < -1 || threshold > 1) throw new Error("threshold must be a finite number between -1 and 1");
     if (!Number.isInteger(maxResultsPerSource) || maxResultsPerSource < 1 || maxResultsPerSource > 10) throw new Error("maxResultsPerSource must be an integer between 1 and 10");
-    const embedding = this.embeddings.embedQuery
-      ? await this.embeddings.embedQuery(query)
-      : (await this.embeddings.embed([query]))[0]!;
-    return this.database.search(query, embedding, options, limit, threshold, options.deduplicateReleases, maxResultsPerSource);
+    const embedding = await this.embedQuery(query);
+    const rerank = Boolean(this.reranker) && (options.rerank ?? false);
+    const candidates = this.database.search(query, embedding, options, rerank ? Math.max(limit, RERANK_DEPTH) : limit, threshold, options.deduplicateReleases, maxResultsPerSource);
+    if (!rerank || candidates.length < 2) return candidates.slice(0, limit);
+    const logits = await this.reranker!.score(query, candidates.map(rerankPassage));
+    const topFusedScore = candidates[0]!.score || 1;
+    return candidates
+      .map((result, index) => ({ result, score: RERANK_WEIGHT * sigmoid(logits[index]!) + (1 - RERANK_WEIGHT) * (result.score / topFusedScore) }))
+      .sort((left, right) => right.score - left.score)
+      .slice(0, limit)
+      .map(({ result, score }) => ({ ...result, score }));
   }
 
   getDocument(sourcePath: string, release?: string) {
@@ -444,7 +567,13 @@ export class DocumentationSearch {
         documentProvider: this.embeddings.endpointModel ? "endpoint" : "local",
         endpointModel: this.embeddings.endpointModel,
         endpointConcurrency: this.embeddings.endpointConcurrency,
+        workers: this.embeddings.workers,
         metrics: this.embeddings.metrics,
+      },
+      embeddingCache: {
+        path: this.paths.embeddingCache,
+        enabled: this.embeddingCacheEnabled,
+        sizeBytes: embeddingCacheSize(this.paths.embeddingCache),
       },
       dataDirectory: this.paths.root,
     };

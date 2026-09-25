@@ -2,7 +2,7 @@ import type { TransformersEmbeddingOptions } from "./embedder.js";
 
 export const DEFAULT_EMBEDDING_PROFILE = "all-minilm-l6-v2";
 
-export interface EmbeddingProfile extends Pick<TransformersEmbeddingOptions, "model" | "pooling" | "layerNorm" | "documentPrefix" | "queryPrefix" | "maxEmbeddingCharacters"> {
+export interface EmbeddingProfile extends Pick<TransformersEmbeddingOptions, "model" | "pooling" | "layerNorm" | "documentPrefix" | "queryPrefix" | "maxEmbeddingCharacters" | "workerMemoryMegabytes"> {
   dimensions: number;
   /** Lowest dimension count this Matryoshka-trained model can be truncated to via --embedding-dimensions. Omitted means the profile has a fixed dimension count and cannot be overridden. */
   minDimensions?: number;
@@ -17,6 +17,7 @@ export const EMBEDDING_PROFILES = {
     documentPrefix: "",
     queryPrefix: "Represent this sentence for searching relevant passages: ",
     maxEmbeddingCharacters: 2048,
+    workerMemoryMegabytes: 1300,
     minDimensions: undefined,
   },
   "nomic-embed-text-v1.5": {
@@ -27,6 +28,7 @@ export const EMBEDDING_PROFILES = {
     documentPrefix: "search_document: ",
     queryPrefix: "search_query: ",
     maxEmbeddingCharacters: 2048,
+    workerMemoryMegabytes: 1500,
     minDimensions: 64,
   },
   "nomic-embed-text-v1": {
@@ -37,6 +39,7 @@ export const EMBEDDING_PROFILES = {
     documentPrefix: "search_document: ",
     queryPrefix: "search_query: ",
     maxEmbeddingCharacters: 2048,
+    workerMemoryMegabytes: 1500,
     minDimensions: undefined,
   },
   "multilingual-e5-small": {
@@ -47,6 +50,18 @@ export const EMBEDDING_PROFILES = {
     documentPrefix: "passage: ",
     queryPrefix: "query: ",
     maxEmbeddingCharacters: 2048,
+    workerMemoryMegabytes: 700,
+    minDimensions: undefined,
+  },
+  "mxbai-embed-xsmall-v1": {
+    model: "mixedbread-ai/mxbai-embed-xsmall-v1",
+    dimensions: 384,
+    pooling: "mean",
+    layerNorm: false,
+    documentPrefix: "",
+    queryPrefix: "",
+    maxEmbeddingCharacters: 2048,
+    workerMemoryMegabytes: 350,
     minDimensions: undefined,
   },
   "all-minilm-l6-v2": {
@@ -57,6 +72,7 @@ export const EMBEDDING_PROFILES = {
     documentPrefix: "",
     queryPrefix: "",
     maxEmbeddingCharacters: 1024,
+    workerMemoryMegabytes: 300,
     minDimensions: undefined,
   },
 } as const satisfies Record<string, EmbeddingProfile>;

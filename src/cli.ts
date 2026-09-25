@@ -5,7 +5,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_MAX_EMBEDDING_CHARACTERS, PACKAGE_VERSION } from "./config.js";
 import { resolvePaths } from "./config.js";
-import { HashEmbeddingProvider, type EmbeddingDevice, type TransformersEmbeddingOptions } from "./embedder.js";
+import { harvestIndexEmbeddings, type HarvestResult } from "./embedding-cache.js";
+import { EMBEDDING_DTYPES, HashEmbeddingProvider, type EmbeddingDevice, type TransformersEmbeddingOptions } from "./embedder.js";
 import { DEFAULT_EMBEDDING_PROFILE, EMBEDDING_PROFILES, type EmbeddingProfileName } from "./embedding-profiles.js";
 import { DocumentationSearch } from "./service-context.js";
 import type { ChunkType, DocType } from "./types.js";
@@ -19,6 +20,8 @@ interface GlobalOptions {
 	embeddingBatchSize?: number;
 	embeddingMaxCharacters?: number;
 	embeddingThreads?: number;
+	embeddingWorkers?: number;
+	embeddingCache: boolean;
 	embeddingProfile?: EmbeddingProfileName;
 	embeddingDimensions?: number;
 	embeddingEndpoint?: string;
@@ -70,6 +73,9 @@ function createContext(command: Command): DocumentationSearch {
 		embeddingBatchSize: options.embeddingBatchSize,
 		embeddingMaxCharacters: options.embeddingMaxCharacters,
 		embeddingThreads: options.embeddingThreads,
+		embeddingWorkers: options.embeddingWorkers,
+		// Leaves the library default (on, except for custom providers such as --deterministic-embeddings) unless disabled.
+		embeddingCache: options.embeddingCache ? undefined : false,
 		embeddingProfile: options.embeddingProfile,
 		embeddingDimensions: options.embeddingDimensions,
 		embeddingEndpoint: options.embeddingEndpoint,
@@ -117,18 +123,20 @@ const program = new Command()
 	.option("--deterministic-embeddings", "use lightweight hash embeddings for testing")
 	.addOption(new Option("--embedding-profile <profile>", `curated ONNX embedding profile (new-index default: ${DEFAULT_EMBEDDING_PROFILE})`).choices(Object.keys(EMBEDDING_PROFILES)))
 	.option("--embedding-dimensions <count>", "truncate to this many embedding dimensions (only supported by Matryoshka-capable profiles, e.g. nomic-embed-text-v1.5)", integerOption("embedding-dimensions", 1, 4096))
-	.addOption(new Option("--device <device>", "embedding execution device").choices(["cpu", "dml", "webgpu"]).default("cpu"))
-	.addOption(new Option("--embedding-dtype <dtype>", "ONNX quantization for the embedding model (default: q8)").choices(["auto", "fp32", "fp16", "q8", "q4", "q4f16"]))
+	.addOption(new Option("--device <device>", "device for document embedding while indexing: cpu, dml (DirectML on Windows), or webgpu (Metal on macOS, Direct3D 12/Vulkan elsewhere); searches always run on the CPU").choices(["cpu", "dml", "webgpu"]).default("cpu"))
+	.addOption(new Option("--embedding-dtype <dtype>", "ONNX precision for the embedding model; remembered by the index (new-index default: q8, or fp16 with --device webgpu)").choices([...EMBEDDING_DTYPES]))
 	.option("--embedding-batch-size <count>", "texts per embedding inference batch (default: 32 CPU, 8 DirectML)", integerOption("embedding-batch-size", 1, 1024))
 	.option(`--embedding-max-characters <count>`, `override the profile-specific passage cap (MiniLM: 1024; other built-in profiles: ${DEFAULT_MAX_EMBEDDING_CHARACTERS})`, integerOption("embedding-max-characters", 256, 1_000_000))
-	.option("--embedding-threads <count>", "ONNX Runtime intra-op thread count for CPU inference (default: the host's logical core count)", integerOption("embedding-threads", 1, 1024))
+	.option("--embedding-threads <count>", "total CPU threads for embedding inference, split across embedding workers (default: the host's logical core count)", integerOption("embedding-threads", 1, 1024))
+	.option("--embedding-workers <count>", "parallel CPU embedding workers for indexing, each with its own model copy (default: embedding threads, at most 8; 1 embeds in-process)", integerOption("embedding-workers", 1, 64))
+	.option("--no-embedding-cache", "embed every changed passage instead of reusing vectors from the embedding cache")
 	.option("--embedding-endpoint <url>", "OpenAI-compatible /embeddings endpoint used only for document indexing")
 	.option("--embedding-endpoint-model <model>", "model ID sent to the document embedding endpoint")
 	.option("--embedding-api-key-env <name>", "environment variable containing the endpoint API key", "OPENROUTER_API_KEY")
 	.option("--embedding-endpoint-batch-size <count>", "texts per remote embedding request (default: 64)", integerOption("embedding-endpoint-batch-size", 1, 1024))
 	.option("--embedding-endpoint-concurrency <count>", "concurrent remote embedding requests (default: 4)", integerOption("embedding-endpoint-concurrency", 1, 32))
 	.option("--embedding-endpoint-timeout <seconds>", "remote request timeout before retrying (default: 30)", integerOption("embedding-endpoint-timeout", 1, 600))
-	.option("--vector-oversample <count>", "binary vector coarse candidates per final candidate (default: 8)", integerOption("vector-oversample", 1, 64))
+	.option("--vector-oversample <count>", "binary vector coarse candidates per final candidate (default: 4)", integerOption("vector-oversample", 1, 64))
 	.configureOutput({
 		outputError: (message, write) => {
 			if (process.argv.includes("--json")) write(`${JSON.stringify({ error: message.trim().replace(/^error:\s*/, "") })}\n`);
@@ -166,12 +174,14 @@ program.command("search")
 	.option("--threshold <number>", "minimum cosine similarity for semantic candidates; lexical matches remain eligible", numberOption("threshold", -1, 1), 0.3)
 	.option("--deduplicate-releases", "return only the best-scoring release of each source chunk")
 	.option("--max-per-source <count>", "maximum results from one source document", integerOption("max-per-source", 1, 10), 3)
+	.option("--rerank", "rescore the top candidates with a local cross-encoder (downloads a small model on first use)")
 	.action(async (query, options, command) => withContext(command, async (context) => {
 		output(command, await context.search(query, {
 			limit: options.limit,
 			threshold: options.threshold,
 			deduplicateReleases: Boolean(options.deduplicateReleases),
 			maxResultsPerSource: options.maxPerSource,
+			rerank: Boolean(options.rerank),
 			release: options.family,
 			docType: options.docType as DocType | undefined,
 			publication: options.publication,
@@ -199,12 +209,26 @@ program.command("status")
 	.action(async (_options, command) => withContext(command, (context) => output(command, context.status())));
 
 program.command("reset-index")
-	.description("Remove the SQLite index while preserving models and the documentation clone")
+	.description("Remove the SQLite index while preserving models, the documentation clone, and the embedding cache")
 	.requiredOption("--yes", "confirm destructive index removal")
-	.action(async (_options, command) => {
-		const paths = resolvePaths((command as Command).optsWithGlobals<GlobalOptions>().dataDir);
+	.option("--clear-embedding-cache", "also remove the embedding cache, so the next build embeds every passage again")
+	.action(async (options, command) => {
+		const globals = (command as Command).optsWithGlobals<GlobalOptions>();
+		const paths = resolvePaths(globals.dataDir);
+		let embeddingCache: HarvestResult | { removed: string } | undefined;
+		if (options.clearEmbeddingCache) {
+			await Promise.all([paths.embeddingCache, `${paths.embeddingCache}-shm`, `${paths.embeddingCache}-wal`].map((filename) => fs.rm(filename, { force: true })));
+			embeddingCache = { removed: paths.embeddingCache };
+		} else if (globals.embeddingCache && !globals.deterministicEmbeddings) {
+			// Saves the index's vectors first, so the rebuild only embeds passages whose text changed.
+			embeddingCache = harvestIndexEmbeddings(paths.database, paths.embeddingCache, globals.json ? undefined : (message) => console.error(message));
+		}
 		await Promise.all([paths.database, `${paths.database}-shm`, `${paths.database}-wal`].map((filename) => fs.rm(filename, { force: true })));
-		output(command, { removed: paths.database, preserved: [paths.models, paths.repository] });
+		output(command, {
+			removed: paths.database,
+			preserved: [paths.models, paths.repository, ...(options.clearEmbeddingCache ? [] : [paths.embeddingCache])],
+			...(embeddingCache ? { embeddingCache } : {}),
+		});
 	});
 
 program.command("skill")

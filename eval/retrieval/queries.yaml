@@ -1,0 +1,880 @@
+# Golden queries for retrieval benchmarking (npm run eval:retrieval).
+# A result matches a relevant entry when its sourcePath equals `path` and, when given,
+# its methodName equals `method` (case-insensitive) and its heading contains `heading`.
+# List every acceptable variant (for example Global and Scoped API pages) as separate entries.
+release: australia
+queries:
+  # --- Exact API identifiers ---
+  - id: api-gliderecord-addquery
+    category: api-identifier
+    query: GlideRecord addQuery
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: addQuery }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: addQuery }
+  - id: api-gliderecord-addencodedquery
+    category: api-identifier
+    query: GlideRecord.addEncodedQuery
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: addEncodedQuery }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: addEncodedQuery }
+  - id: api-gs-getproperty
+    category: api-identifier
+    query: gs.getProperty
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemAPI.md, method: getProperty }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemScopedAPI.md, method: getProperty }
+  - id: api-gs-eventqueue
+    category: api-identifier
+    query: GlideSystem eventQueue
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemAPI.md, method: eventQueue }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemScopedAPI.md, method: eventQueue }
+  - id: api-glideajax-getxmlanswer
+    category: api-identifier
+    query: GlideAjax getXMLAnswer
+    relevant:
+      - { path: markdown/api-reference/c_GlideAjaxAPI.md, method: getXMLAnswer }
+  - id: api-gdt-adddayslocaltime
+    category: api-identifier
+    query: GlideDateTime addDaysLocalTime
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeAPI.md, method: addDaysLocalTime }
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeScoped.md, method: addDaysLocalTime }
+  - id: api-gliderecord-setworkflow
+    category: api-identifier
+    query: setWorkflow(false)
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: setWorkflow }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: setWorkflow }
+  - id: api-glideaggregate
+    category: api-identifier
+    query: GlideAggregate
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideAggregateAPI.md }
+      - { path: markdown/api-reference/server-api-reference/c_GlideAggregateScopedAPI.md }
+  - id: api-restmessagev2
+    category: api-identifier
+    query: RESTMessageV2 execute
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_RESTMessageV2API.md }
+  - id: api-glidequery
+    category: api-identifier
+    query: GlideQuery
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/GlideQueryGlobalAPI.md }
+  - id: api-gform-setmandatory
+    category: api-identifier
+    query: g_form.setMandatory
+    relevant:
+      - { path: markdown/api-reference/c_GlideFormAPI.md }
+      - { path: markdown/api-reference/GlideFormAPINX.md }
+  - id: api-glidesysattachment
+    category: api-identifier
+    query: GlideSysAttachment copy attachments
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/GlideSysAttachmentGlobalAPI.md }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSysAttachmentScopedAPI.md }
+  - id: api-sputil
+    category: api-identifier
+    query: spUtil
+    relevant:
+      - { path: markdown/api-reference/spUtilAPI.md }
+  - id: api-flowapi
+    category: api-identifier
+    query: FlowAPI startFlow
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/ScriptableFlowAPI.md }
+  - id: api-gliderecord-getvalue
+    category: api-identifier
+    query: GlideRecord getValue
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: getValue }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: getValue }
+  - id: api-gform-getreference
+    category: api-identifier
+    query: g_form.getReference
+    relevant:
+      - { path: markdown/api-reference/c_GlideFormAPI.md, method: getReference }
+  - id: api-gdt-getnumericvalue
+    category: api-identifier
+    query: GlideDateTime getNumericValue
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeAPI.md, method: getNumericValue }
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeScoped.md, method: getNumericValue }
+  - id: api-gs-getuser
+    category: api-identifier
+    query: gs.getUser()
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemAPI.md, method: getUser }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemScopedAPI.md, method: getUser }
+  - id: api-restmessagev2-setbasicauth
+    category: api-identifier
+    query: RESTMessageV2 setBasicAuth
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_RESTMessageV2API.md, method: setBasicAuth }
+  - id: api-glidejsonpath-read
+    category: api-identifier
+    query: GlideJsonPath read
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/GlideJsonPathAPI.md, method: read }
+
+  # --- Natural-language API questions ---
+  - id: nlapi-limit-records
+    category: api-natural
+    query: limit the number of records returned by a query in a server script
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: setLimit }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: setLimit }
+      - { path: markdown/api-reference/server-api-reference/GlideQueryGlobalAPI.md, method: limit }
+  - id: nlapi-display-value
+    category: api-natural
+    query: get the display value of a reference field on a record
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: getDisplayValue }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: getDisplayValue }
+      - { path: markdown/api-reference/server-api-reference/c_GlideElementAPI.md, method: getDisplayValue }
+      - { path: markdown/api-reference/server-api-reference/c_GlideElementScopedAPI.md, method: getDisplayValue }
+  - id: nlapi-skip-business-rules
+    category: api-natural
+    query: update a record without running business rules
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: setWorkflow }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: setWorkflow }
+  - id: nlapi-check-role
+    category: api-natural
+    query: check if the current user has a role in a server script
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemAPI.md, method: hasRole }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemScopedAPI.md, method: hasRole }
+      - { path: markdown/api-reference/server-api-reference/GUserAPI.md, method: hasRole }
+      - { path: markdown/api-reference/server-api-reference/c_GlideUserScopedAPI.md, method: hasRole }
+  - id: nlapi-current-user-id
+    category: api-natural
+    query: get the sys_id of the logged in user
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemAPI.md, method: getUserID }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemScopedAPI.md, method: getUserID }
+      - { path: markdown/api-reference/c_GlideUserAPI.md }
+      - { path: markdown/api-reference/server-api-reference/GUserAPI.md }
+      - { path: markdown/api-reference/server-api-reference/c_GlideUserScopedAPI.md }
+  - id: nlapi-count-records
+    category: api-natural
+    query: count the number of incidents grouped by priority
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideAggregateAPI.md }
+      - { path: markdown/api-reference/server-api-reference/c_GlideAggregateScopedAPI.md }
+      - { path: markdown/api-reference/server-api-reference/GlideQueryGlobalAPI.md, method: groupBy }
+      - { path: markdown/api-reference/server-api-reference/GlideQueryGlobalAPI.md, method: count }
+      - { path: markdown/api-reference/server-api-reference/GlideQueryGlobalAPI.md, method: aggregate }
+  - id: nlapi-call-script-include-client
+    category: api-natural
+    query: call a server-side script include asynchronously from a client script
+    relevant:
+      - { path: markdown/api-reference/c_GlideAjaxAPI.md }
+  - id: nlapi-info-message
+    category: api-natural
+    query: show an info message at the top of the form from a business rule
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemAPI.md, method: addInfoMessage }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemScopedAPI.md, method: addInfoMessage }
+  - id: nlapi-outbound-rest
+    category: api-natural
+    query: send an outbound HTTP request to an external web service from a script
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_RESTMessageV2API.md }
+      - { path: markdown/api-reference/web-services/c_OutboundRESTWebService.md }
+  - id: nlapi-delete-many
+    category: api-natural
+    query: delete all records matching a query
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: deleteMultiple }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: deleteMultiple }
+      - { path: markdown/api-reference/server-api-reference/GlideQueryGlobalAPI.md, method: deleteMultiple }
+  - id: nlapi-paginate
+    category: api-natural
+    query: paginate GlideRecord results
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: chooseWindow }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: chooseWindow }
+  - id: nlapi-rest-table-read
+    category: api-natural
+    query: retrieve records from a table using the REST API
+    relevant:
+      - { path: markdown/api-reference/rest-apis/c_TableAPI.md }
+      - { path: markdown/api-reference/rest-api-explorer/t_GetStartedRetrieveExisting.md }
+  - id: nlapi-rest-upload-attachment
+    category: api-natural
+    query: upload a file attachment to a record over REST
+    relevant:
+      - { path: markdown/api-reference/rest-apis/c_AttachmentAPI.md }
+  - id: nlapi-null-field
+    category: api-natural
+    query: find records where a field is empty
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: addNullQuery }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: addNullQuery }
+      - { path: markdown/api-reference/server-api-reference/GlideQueryGlobalAPI.md, method: whereNull }
+  - id: nlapi-add-days
+    category: api-natural
+    query: add three days to a date and time value in a server script
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeAPI.md, method: addDaysLocalTime }
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeScoped.md, method: addDaysLocalTime }
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeAPI.md, method: addDaysUTC }
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeScoped.md, method: addDaysUTC }
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeAPI.md, method: addDays }
+  - id: nlapi-date-difference
+    category: api-natural
+    query: calculate the time between two date time fields in a script
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeAPI.md, method: subtract }
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeScoped.md, method: subtract }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemAPI.md, method: dateDiff }
+  - id: nlapi-field-changed
+    category: api-natural
+    query: check whether a field value changed in a business rule
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideElementAPI.md, method: changes }
+      - { path: markdown/api-reference/server-api-reference/c_GlideElementScopedAPI.md, method: changes }
+      - { path: markdown/api-reference/server-api-reference/c_GlideElementAPI.md, method: changesTo }
+      - { path: markdown/api-reference/server-api-reference/c_GlideElementScopedAPI.md, method: changesTo }
+      - { path: markdown/api-reference/server-api-reference/c_GlideElementAPI.md, method: changesFrom }
+      - { path: markdown/api-reference/server-api-reference/c_GlideElementScopedAPI.md, method: changesFrom }
+  - id: nlapi-set-field-client
+    category: api-natural
+    query: set a field value on the form from a client script
+    relevant:
+      - { path: markdown/api-reference/c_GlideFormAPI.md, method: setValue }
+  - id: nlapi-read-only-client
+    category: api-natural
+    query: make a field read only from a client script
+    relevant:
+      - { path: markdown/api-reference/c_GlideFormAPI.md, method: setReadOnly }
+  - id: nlapi-field-message
+    category: api-natural
+    query: show a warning message below a field on the form
+    relevant:
+      - { path: markdown/api-reference/c_GlideFormAPI.md, method: showFieldMsg }
+  - id: nlapi-hide-field-client
+    category: api-natural
+    query: hide a field on the form using a client script
+    relevant:
+      - { path: markdown/api-reference/c_GlideFormAPI.md, method: setDisplay }
+      - { path: markdown/api-reference/c_GlideFormAPI.md, method: setVisible }
+  - id: nlapi-client-role-check
+    category: api-natural
+    query: check if the current user has a role in a client script
+    relevant:
+      - { path: markdown/api-reference/c_GlideUserAPI.md, method: hasRole }
+      - { path: markdown/api-reference/c_GlideUserAPI.md, method: hasRoleExactly }
+  - id: nlapi-encoded-query-string
+    category: api-natural
+    query: get the encoded query string of the current query
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: getEncodedQuery }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: getEncodedQuery }
+  - id: nlapi-insert-record
+    category: api-natural
+    query: create a new record in a table from a server script
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: initialize }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: initialize }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: insert }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: insert }
+      - { path: markdown/api-reference/server-api-reference/GlideQueryGlobalAPI.md, method: insert }
+  - id: nlapi-log-message
+    category: api-natural
+    query: write a message to the system log from a server script
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemAPI.md, method: log }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemScopedAPI.md, method: info }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemScopedAPI.md, method: debug }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemScopedAPI.md, method: warn }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemScopedAPI.md, method: error }
+  - id: nlapi-attach-file-script
+    category: api-natural
+    query: attach a text file to a record from a script
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/GlideSysAttachmentGlobalAPI.md, method: write }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSysAttachmentScopedAPI.md, method: write }
+  - id: nlapi-or-condition
+    category: api-natural
+    query: combine two conditions with OR in a GlideRecord query
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideQueryConditionAPI.md, method: addOrCondition }
+      - { path: markdown/api-reference/server-api-reference/c_GlideQueryConditionScopedAPI.md, method: addOrCondition }
+      - { path: markdown/api-reference/server-api-reference/GlideQueryGlobalAPI.md, method: orWhere }
+  - id: nlapi-date-display-format
+    category: api-natural
+    query: show a date time value in the user's time zone and format
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeAPI.md, method: getDisplayValue }
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeScoped.md, method: getDisplayValue }
+  - id: nlapi-async-rest
+    category: api-natural
+    query: send an outbound REST call without waiting for the response
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_RESTMessageV2API.md, method: executeAsync }
+  - id: nlapi-rest-header
+    category: api-natural
+    query: add an authorization header to an outbound REST request
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_RESTMessageV2API.md, method: setRequestHeader }
+      - { path: markdown/api-reference/server-api-reference/c_RESTMessageV2API.md, method: setBasicAuth }
+  - id: nlapi-current-user-name
+    category: api-natural
+    query: get the user name of the currently logged in user
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemAPI.md, method: getUserName }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemScopedAPI.md, method: getUserName }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemAPI.md, method: getUserDisplayName }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemScopedAPI.md, method: getUserDisplayName }
+  - id: nlapi-record-exists
+    category: api-natural
+    query: check whether a query returned any records
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: hasNext }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: hasNext }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: next }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: next }
+  - id: nlapi-abort-save
+    category: api-natural
+    query: stop a record from being saved in a before business rule
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: setAbortAction }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: setAbortAction }
+  - id: nlapi-sort-results
+    category: api-natural
+    query: sort query results by created date newest first
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: orderByDesc }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: orderByDesc }
+      - { path: markdown/api-reference/server-api-reference/GlideQueryGlobalAPI.md, method: orderByDesc }
+  - id: nlapi-parse-json
+    category: api-natural
+    query: convert a JSON string into an object in a server script
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_JSONAPI.md, method: parse }
+      - { path: markdown/api-reference/server-api-reference/JSONScopedAPI.md, method: parse }
+  - id: nlapi-current-time
+    category: api-natural
+    query: get the current date and time in a server script
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeAPI.md, method: GlideDateTime }
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeScoped.md, method: GlideDateTime }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemAPI.md, method: nowDateTime }
+
+  # --- How-to / configuration ---
+  - id: howto-business-rule-after-insert
+    category: how-to
+    query: create a business rule that runs after insert
+    relevant:
+      - { path: markdown/build-workflows/business-rules-classic/c_BusinessRules.md }
+      - { path: markdown/api-reference/business-rules-classic/c_BusinessRules.md }
+      - { path: markdown/application-development/business-rules-and-script-includes.md }
+  - id: howto-inbound-email-action
+    category: how-to
+    query: create a record from an incoming email
+    relevant:
+      - { path: markdown/platform-administration/t_CreatingAnInboundEmailAction.md }
+      - { path: markdown/platform-administration/c_InboundEmailActions.md }
+      - { path: markdown/platform-administration/actions-inbound-email.md }
+  - id: howto-data-policy
+    category: how-to
+    query: make a field mandatory for imports and web services
+    relevant:
+      - { path: markdown/platform-administration/t_CreateADataPolicy.md }
+  - id: howto-ui-policy
+    category: how-to
+    query: hide a field on a form based on a condition without scripting
+    relevant:
+      - { path: markdown/platform-administration/t_CreateAUIPolicy.md }
+      - { path: markdown/it-service-management/change-management/t_AddUIPolicy.md }
+  - id: howto-merge-update-sets
+    category: how-to
+    query: merge update sets
+    relevant:
+      - { path: markdown/application-development/system-update-sets/t_MergeUpdateSets.md }
+  - id: howto-sla-definition
+    category: how-to
+    query: define an SLA with start and stop conditions
+    relevant:
+      - { path: markdown/it-service-management/service-level-management/t_CreateAnSLADefinition.md }
+  - id: howto-transform-map
+    category: how-to
+    query: map imported spreadsheet columns to target table fields
+    relevant:
+      - { path: markdown/integrate-applications/system-import-sets/c_CreatingNewTransformMaps.md }
+      - { path: markdown/environmental-social-governance/create-a-transform-map.md }
+  - id: howto-scripted-rest
+    category: how-to
+    query: create a custom REST endpoint with a script
+    relevant:
+      - { path: markdown/api-reference/rest-api-explorer/t_CreateAScriptedRESTService.md }
+      - { path: markdown/api-reference/rest-api-explorer/c_CustomWebServices.md }
+      - { path: markdown/api-reference/rest-api-explorer/t_CreateAScriptedRESTAPIResource.md }
+  - id: howto-register-event
+    category: how-to
+    query: register a custom event to trigger an email notification
+    relevant:
+      - { path: markdown/build-workflows/system-events/t_RegisterAnEvent.md }
+      - { path: markdown/build-workflows/system-events/t_CreateYourOwnEvent.md }
+      - { path: markdown/build-workflows/system-events/c_EventRegistry.md }
+  - id: howto-reference-qualifier
+    category: how-to
+    query: restrict the choices shown in a reference field
+    relevant:
+      - { path: markdown/platform-administration/c_ReferenceQualifiers.md }
+      - { path: markdown/platform-administration/t_ConfigureReferenceQualifiers.md }
+  - id: howto-mid-linux
+    category: how-to
+    query: install a MID Server on Linux
+    relevant:
+      - { path: markdown/servicenow-platform/mid-server/t_InstallAMIDServerOnLinux.md }
+  - id: howto-oauth-inbound
+    category: how-to
+    query: enable OAuth for inbound REST requests
+    relevant:
+      - { path: markdown/api-reference/rest-api-explorer/t_EnableOAuthWithREST.md }
+  - id: howto-oauth-outbound
+    category: how-to
+    query: configure a REST message to use OAuth 2.0
+    relevant:
+      - { path: markdown/api-reference/web-services/t_ConfigureARESTMessageWithOAuth.md }
+  - id: howto-scheduled-job
+    category: how-to
+    query: run a script on a schedule every night
+    relevant:
+      - { path: markdown/platform-administration/time-configuration/c_ScheduledJobs.md }
+      - { path: markdown/platform-administration/time-configuration/t_ScheduleAScriptExecution.md }
+  - id: howto-ui-action
+    category: how-to
+    query: add a button to a form that runs a script
+    relevant:
+      - { path: markdown/platform-administration/t_EditingAUIAction.md }
+      - { path: markdown/it-service-management/change-management/t_CreateNewUIAction.md }
+  - id: howto-create-incident
+    category: how-to
+    query: log a new incident as a service desk agent
+    relevant:
+      - { path: markdown/it-service-management/incident-management/create-an-incident.md }
+      - { path: markdown/it-service-management/incident-management/logging-incident.md }
+  - id: howto-catalog-client-script
+    category: how-to
+    query: run a client script on a catalog item variable change
+    relevant:
+      - { path: markdown/api-reference/scripts/c_CatalogClientScriptCreation.md }
+  - id: howto-client-scripts
+    category: how-to
+    query: onChange client script examples
+    relevant:
+      - { path: markdown/api-reference/scripts/client-scripts.md }
+  - id: howto-create-table
+    category: how-to
+    query: create a new custom table
+    relevant:
+      - { path: markdown/platform-administration/table-administration-and-data-management/t_CreateATable.md }
+  - id: howto-email-notification
+    category: how-to
+    query: send an email automatically when a record changes
+    relevant:
+      - { path: markdown/platform-administration/t_CreateANotification.md }
+  - id: howto-create-report
+    category: how-to
+    query: build a bar chart report of open incidents
+    relevant:
+      - { path: markdown/now-intelligence/reporting/t_CreateYourOwnReport.md }
+  - id: howto-knowledge-article
+    category: how-to
+    query: write and publish a knowledge base article
+    relevant:
+      - { path: markdown/servicenow-platform/knowledge-management/create-knowledge-article.md }
+  - id: howto-assignment-rule
+    category: how-to
+    query: automatically assign incidents to a group based on category
+    relevant:
+      - { path: markdown/platform-administration/table-administration-and-data-management/t_AssignmentModuleRule.md }
+  - id: howto-export-list
+    category: how-to
+    query: export a list of records to Excel
+    relevant:
+      - { path: markdown/platform-administration/table-administration-and-data-management/export-list-data.md }
+      - { path: markdown/now-intelligence/reporting/t_ExportAListReportToExcel.md }
+  - id: howto-schedule-report
+    category: how-to
+    query: email a report to managers every Monday
+    relevant:
+      - { path: markdown/now-intelligence/reporting/t_ScheduleAReport.md }
+  - id: howto-activate-plugin
+    category: how-to
+    query: turn on a plugin on my instance
+    relevant:
+      - { path: markdown/platform-administration/t_ActivateAPlugin.md }
+  - id: howto-record-producer
+    category: how-to
+    query: let users create an incident from the service catalog
+    relevant:
+      - { path: markdown/servicenow-platform/service-catalog/t_DefRecProdInSCat.md }
+  - id: howto-catalog-item
+    category: how-to
+    query: add a new item that users can order from the service catalog
+    relevant:
+      - { path: markdown/servicenow-platform/service-catalog/t_DefineACatalogItem.md }
+      - { path: markdown/servicenow-platform/service-catalog/create-item-cat-builder.md }
+  - id: howto-clone-instance
+    category: how-to
+    query: copy production data to a test instance
+    relevant:
+      - { path: markdown/platform-administration/t_StartAClone.md }
+  - id: howto-form-layout
+    category: how-to
+    query: rearrange the fields on a form
+    relevant:
+      - { path: markdown/platform-administration/configure-form-layout.md }
+      - { path: markdown/platform-administration/c_FormDesign.md }
+  - id: howto-create-app
+    category: how-to
+    query: start building a new custom application
+    relevant:
+      - { path: markdown/application-development/app-engine-studio/app-tutorial-create-an-app.md }
+  - id: howto-ldap
+    category: how-to
+    query: sync users and groups from Active Directory
+    relevant:
+      - { path: markdown/platform-security/ldap-integration/c_LDAPIntegrationSetup.md }
+  - id: howto-outbound-email
+    category: how-to
+    query: configure the instance to send email through our mail server
+    relevant:
+      - { path: markdown/platform-administration/r_OutboundMailConfiguration.md }
+  - id: howto-read-only-field-admin
+    category: how-to
+    query: make a field read only for everyone
+    relevant:
+      - { path: markdown/platform-administration/table-administration-and-data-management/make-field-read-only.md }
+
+  # --- Acronyms and ServiceNow jargon ---
+  - id: acr-acl
+    category: acronym
+    query: ACL
+    relevant:
+      - { path: markdown/platform-security/access-control/access-control-rules.md }
+      - { path: markdown/it-service-management/change-management/t_CreateNewACL.md }
+  - id: acr-create-acl
+    category: acronym
+    query: create an ACL for a table
+    relevant:
+      - { path: markdown/it-service-management/change-management/t_CreateNewACL.md }
+      - { path: markdown/platform-security/access-control/access-control-rules.md }
+      - { path: markdown/platform-security/access-control/t_CreateAnACLRule.md }
+  - id: acr-atf
+    category: acronym
+    query: ATF
+    relevant:
+      - { path: markdown/application-development/automated-test-framework-atf/atf-landing-page.md }
+      - { path: markdown/application-development/automated-test-framework-atf/atf-ref-overview.md }
+  - id: acr-atf-test-br
+    category: acronym
+    query: ATF test for a BR
+    relevant:
+      - { path: markdown/application-development/automated-test-framework-atf/atf-biz-rule-use.md }
+  - id: acr-cmdb
+    category: acronym
+    query: CMDB
+    relevant:
+      - { path: markdown/servicenow-platform/configuration-management-database-cmdb/c_ITILConfigurationManagement.md }
+  - id: acr-mid
+    category: acronym
+    query: MID server
+    relevant:
+      - { path: markdown/servicenow-platform/mid-server/mid-server-install-prereqs.md }
+      - { path: markdown/servicenow-platform/mid-server/t_InstallAMIDServerOnLinux.md }
+      - { path: markdown/it-operations-management/configure-a-mid-server.md }
+      - { path: markdown/servicenow-platform/mid-server/explore-mid-server.md }
+  - id: acr-script-include
+    category: acronym
+    query: SI reusable server-side functions
+    relevant:
+      - { path: markdown/api-reference/scripts/c_ScriptIncludes.md }
+      - { path: markdown/application-development/business-rules-and-script-includes.md }
+  - id: acr-sla
+    category: acronym
+    query: SLA definition
+    relevant:
+      - { path: markdown/it-service-management/service-level-management/t_CreateAnSLADefinition.md }
+  - id: acr-cab
+    category: acronym
+    query: CAB meeting agenda
+    relevant:
+      - { path: markdown/it-service-management/change-management/cab-workbench.md }
+  - id: acr-ire
+    category: acronym
+    query: IRE duplicate CIs
+    relevant:
+      - { path: markdown/servicenow-platform/configuration-management-database-cmdb/c_CMDBIdentifyandReconcile.md }
+  - id: acr-ham
+    category: acronym
+    query: HAM
+    relevant:
+      - { path: markdown/it-asset-management/hardware-asset-management/ham-landing-page.md }
+  - id: acr-sam
+    category: acronym
+    query: SAM license compliance
+    relevant:
+      - { path: markdown/it-asset-management/software-asset-management/c_SoftwareAssetMgmt.md }
+  - id: acr-csm
+    category: acronym
+    query: CSM
+    relevant:
+      - { path: markdown/customer-service-management/c_CustomerServiceManagement.md }
+      - { path: markdown/customer-relationship-management/crm-about-csm-in-crm.md }
+  - id: acr-hrsd
+    category: acronym
+    query: HRSD cases
+    relevant:
+      - { path: markdown/employee-service-management/hr-service-delivery/hr-service-delivery.md }
+  - id: acr-itom
+    category: acronym
+    query: ITOM
+    relevant:
+      - { path: markdown/it-operations-management/r_ITOMApplications.md }
+  - id: acr-pa
+    category: acronym
+    query: PA indicators
+    relevant:
+      - { path: markdown/now-intelligence/performance-analytics/c_GetStartedwithPA.md }
+
+  # --- Glossary terms ---
+  - id: gloss-dot-walking
+    category: glossary
+    query: what is dot-walking
+    relevant:
+      - { path: markdown/glossary/now-platform-glossary.md, heading: dot-walking }
+  - id: gloss-record-producer
+    category: glossary
+    query: record producer definition
+    relevant:
+      - { path: markdown/glossary/now-platform-glossary.md, heading: record producer }
+  - id: gloss-ci
+    category: glossary
+    query: what is a configuration item
+    relevant:
+      - { path: markdown/glossary/now-platform-glossary.md, heading: configuration item }
+      - { path: markdown/servicenow-platform/configuration-management-database-cmdb/c_ITILConfigurationManagement.md }
+  - id: gloss-update-set
+    category: glossary
+    query: what is an update set
+    relevant:
+      - { path: markdown/glossary/now-platform-glossary.md, heading: update set }
+      - { path: markdown/application-development/system-update-sets/update-sets-reference.md }
+      - { path: markdown/application-development/system-update-sets/system-update-sets.md }
+  - id: gloss-business-rule
+    category: glossary
+    query: what is a business rule
+    relevant:
+      - { path: markdown/glossary/now-platform-glossary.md, heading: business rule }
+  - id: gloss-ui-policy
+    category: glossary
+    query: UI policy meaning
+    relevant:
+      - { path: markdown/glossary/now-platform-glossary.md, heading: UI policy }
+  - id: gloss-related-list
+    category: glossary
+    query: what is a related list
+    relevant:
+      - { path: markdown/glossary/now-platform-glossary.md, heading: related list }
+  - id: gloss-dictionary
+    category: glossary
+    query: what is the dictionary
+    relevant:
+      - { path: markdown/glossary/now-platform-glossary.md, heading: dictionary }
+  - id: gloss-module
+    category: glossary
+    query: what is a module in the application navigator
+    relevant:
+      - { path: markdown/glossary/now-platform-glossary.md, heading: module }
+  - id: gloss-application-scope
+    category: glossary
+    query: define application scope
+    relevant:
+      - { path: markdown/glossary/now-platform-glossary.md, heading: application scope }
+      - { path: markdown/application-development/c_ApplicationScope.md }
+
+  # --- Parameter / return questions ---
+  - id: param-addquery-operators
+    category: parameter
+    query: addQuery operator parameter values
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: addQuery }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: addQuery }
+  - id: param-getrowcount-return
+    category: parameter
+    query: what does getRowCount return
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: getRowCount }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: getRowCount }
+  - id: param-insert-return
+    category: parameter
+    query: GlideRecord insert return value sys_id
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordAPI.md, method: insert }
+      - { path: markdown/api-reference/server-api-reference/c_GlideRecordScopedAPI.md, method: insert }
+  - id: param-eventqueue-parms
+    category: parameter
+    query: eventQueue parm1 parm2 parameters
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemAPI.md, method: eventQueue }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSystemScopedAPI.md, method: eventQueue }
+  - id: param-table-api-sysparm-query
+    category: parameter
+    query: Table API sysparm_query parameter
+    relevant:
+      - { path: markdown/api-reference/rest-apis/c_TableAPI.md }
+  - id: param-addoption-parameters
+    category: parameter
+    query: what parameters does g_form addOption take
+    relevant:
+      - { path: markdown/api-reference/c_GlideFormAPI.md, method: addOption }
+  - id: param-sethttpmethod-values
+    category: parameter
+    query: RESTMessageV2 setHttpMethod valid values
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_RESTMessageV2API.md, method: setHttpMethod }
+  - id: param-getaggregate-return
+    category: parameter
+    query: what does GlideAggregate getAggregate return
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideAggregateAPI.md, method: getAggregate }
+      - { path: markdown/api-reference/server-api-reference/c_GlideAggregateScopedAPI.md, method: getAggregate }
+  - id: param-adddaysutc-argument
+    category: parameter
+    query: GlideDateTime addDaysUTC argument type
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeAPI.md, method: addDaysUTC }
+      - { path: markdown/api-reference/server-api-reference/c_GlideDateTimeScoped.md, method: addDaysUTC }
+  - id: param-attachment-copy-args
+    category: parameter
+    query: arguments for copying attachments between records
+    relevant:
+      - { path: markdown/api-reference/server-api-reference/GlideSysAttachmentGlobalAPI.md, method: copy }
+      - { path: markdown/api-reference/server-api-reference/c_GlideSysAttachmentScopedAPI.md, method: copy }
+
+  # --- Product concepts ---
+  - id: concept-domain-separation
+    category: concept
+    query: separate data and processes for multiple customers on one instance
+    relevant:
+      - { path: markdown/platform-security/domain-sep-landing-page.md }
+      - { path: markdown/platform-security/c_DomainSeparation.md }
+  - id: concept-discovery
+    category: concept
+    query: automatically find devices and applications on the network
+    relevant:
+      - { path: markdown/it-operations-management/discovery/r-discovery.md }
+      - { path: markdown/it-operations-management/discovery/c_DiscoProcessFlows.md }
+      - { path: markdown/it-operations-management/discovery/disco-process-flow-patterns.md }
+  - id: concept-import-sets
+    category: concept
+    query: import data from external sources into ServiceNow tables
+    relevant:
+      - { path: markdown/integrate-applications/system-import-sets/import-sets-landing-page.md }
+      - { path: markdown/integrate-applications/system-import-sets/c_ImportSetsKeyConcepts.md }
+  - id: concept-ci-class-manager
+    category: concept
+    query: manage CI class hierarchy and identification rules
+    relevant:
+      - { path: markdown/servicenow-platform/configuration-management-database-cmdb/ci-class-manager-landing-page.md }
+  - id: concept-flow-designer
+    category: concept
+    query: automate a process with triggers and actions without code
+    relevant:
+      - { path: markdown/application-development/flow-designer.md }
+      - { path: markdown/application-development/app-engine-studio/app-tutorial-create-a-flow.md }
+  - id: concept-system-properties
+    category: concept
+    query: list of available system properties
+    relevant:
+      - { path: markdown/platform-administration/r_AvailableSystemProperties.md }
+  - id: concept-scripted-rest-good-practices
+    category: concept
+    query: best practices for scripted REST APIs
+    relevant:
+      - { path: markdown/api-reference/rest-api-explorer/scripted-rest-good-practices.md }
+  - id: concept-cmdb-release-notes
+    category: concept
+    query: CMDB release notes
+    relevant:
+      - { path: markdown/release-notes/cmdb-rn.md }
+  - id: concept-application-scope
+    category: concept
+    query: why do custom apps have their own namespace and access restrictions
+    relevant:
+      - { path: markdown/application-development/c_ApplicationScope.md }
+  - id: concept-service-catalog
+    category: concept
+    query: self-service portal where employees order hardware and software
+    relevant:
+      - { path: markdown/servicenow-platform/service-catalog/service-catalog.md }
+      - { path: markdown/servicenow-platform/service-catalog/c_IntroductionToCatalogItems.md }
+  - id: concept-virtual-agent
+    category: concept
+    query: chatbot that answers employee questions in a conversation
+    relevant:
+      - { path: markdown/conversational-interfaces/virtual-agent/virtual-agent-landing-page.md }
+  - id: concept-performance-analytics
+    category: concept
+    query: track KPIs over time with scores and breakdowns
+    relevant:
+      - { path: markdown/now-intelligence/performance-analytics/c_GetStartedwithPA.md }
+      - { path: markdown/now-intelligence/c_performanceAnalyticsAndReporting.md }
+  - id: concept-problem-management
+    category: concept
+    query: find the root cause of recurring incidents
+    relevant:
+      - { path: markdown/it-service-management/problem-management/c_ProblemManagement.md }
+  - id: concept-event-management
+    category: concept
+    query: consolidate alerts from monitoring tools into actionable alerts
+    relevant:
+      - { path: markdown/it-operations-management/event-management/c_EM.md }
+  - id: concept-integration-hub
+    category: concept
+    query: reusable connectors to third-party systems in flows
+    relevant:
+      - { path: markdown/integrate-applications/integration-hub/integrationhub.md }
+      - { path: markdown/application-development/dev-get-start-integration-hub.md }
+  - id: concept-field-service
+    category: concept
+    query: dispatch technicians to customer sites for on-site work
+    relevant:
+      - { path: markdown/field-service-management/fsm-application-landing-page.md }
+  - id: concept-access-control
+    category: concept
+    query: how access to records and fields is controlled
+    relevant:
+      - { path: markdown/platform-security/access-control/access-control-rules.md }
+  - id: concept-security-hardening
+    category: concept
+    query: security settings to harden an instance
+    relevant:
+      - { path: markdown/platform-security/security-center/sc-hardening.md }
+  - id: concept-hr-service-delivery
+    category: concept
+    query: manage employee HR requests and cases
+    relevant:
+      - { path: markdown/employee-service-management/hr-service-delivery/hr-service-delivery.md }
+  - id: concept-software-asset-management
+    category: concept
+    query: track software licenses and compliance
+    relevant:
+      - { path: markdown/it-asset-management/software-asset-management/c_SoftwareAssetMgmt.md }
+  - id: concept-service-portal
+    category: concept
+    query: build a user-friendly portal with widgets
+    relevant:
+      - { path: markdown/platform-user-interface/service-portal/c_ServicePortal.md }
+  - id: concept-knowledge-management
+    category: concept
+    query: share articles and answers across the organization
+    relevant:
+      - { path: markdown/servicenow-platform/knowledge-management/knowledge-management.md }

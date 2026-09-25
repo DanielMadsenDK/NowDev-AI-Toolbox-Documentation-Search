@@ -33,7 +33,7 @@ describe("DocumentationSearchDatabase", () => {
     expect(database.getSourceContent("markdown/itsm/incidents.md", "australia")).toContain("Resolve service interruptions");
     const storedMetadata = database.db.prepare("SELECT metadata FROM documents ORDER BY id").all() as Array<{ metadata: string }>;
     expect(storedMetadata.every((row) => !row.metadata.includes("full_content") && !row.metadata.includes("section_content"))).toBe(true);
-    expect(database.db.prepare("SELECT value FROM settings WHERE key = 'database_schema_version'").get()).toEqual({ value: "2" });
+    expect(database.db.prepare("SELECT value FROM settings WHERE key = 'database_schema_version'").get()).toEqual({ value: "3" });
     database.close();
   });
 
@@ -220,4 +220,75 @@ run("value");
     expect(search()[0]?.sourcePath).toBe(titleMatch!.sourcePath);
     database.close();
   });
+
+  it("stores shared frontmatter once per source and merges it back into results", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-metadata-"));
+    temporaryDirectories.push(directory);
+    const embedder = new HashEmbeddingProvider(16);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), embedder.dimensions);
+    const markdown = "---\ntitle: Data policies\nbreadcrumb: [Data policy, Administer]\ncanonical_url: https://example.test/data-policy.html\n---\n# Data policies\nEnforce data rules.\n## Create a data policy\nSteps to create one.\n### Add rules\nRule steps.";
+    const chunks = chunkDocument("markdown/platform-administration/data-policy.md", markdown, "australia", "australia");
+    database.replaceSources("australia", [{ path: chunks[0]!.sourcePath, blobSha: "one", contentHash: chunks[0]!.contentHash, chunks, embeddings: await embedder.embed(chunks.map((chunk) => chunk.content)) }], []);
+    const stored = database.db.prepare("SELECT metadata FROM documents ORDER BY chunk_index").all() as Array<{ metadata: string }>;
+    expect(stored.every((row) => !row.metadata.includes("canonical_url"))).toBe(true);
+    expect(JSON.parse(stored.at(-1)!.metadata)).toEqual({ heading_path: "Create a data policy > Add rules" });
+    expect(JSON.parse((database.db.prepare("SELECT metadata FROM sources").get() as { metadata: string }).metadata)).toMatchObject({ canonical_url: "https://example.test/data-policy.html", breadcrumb: ["Data policy", "Administer"] });
+    const [queryVector] = await embedder.embed(["add rules"]);
+    const [result] = database.search("add rules", queryVector!, {}, 1, -1);
+    expect(result?.metadata).toMatchObject({ canonical_url: "https://example.test/data-policy.html", heading_path: "Create a data policy > Add rules" });
+    expect(database.getDocument("markdown/platform-administration/data-policy.md").every((chunk) => chunk.metadata.canonical_url === "https://example.test/data-policy.html")).toBe(true);
+    database.close();
+  });
+
+  it("collapses identical passages published under several publications", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-fingerprint-"));
+    temporaryDirectories.push(directory);
+    const embedder = new HashEmbeddingProvider(16);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), embedder.dimensions);
+    const page = (breadcrumb: string) => `---\ntitle: Classic business rules\nbreadcrumb: [${breadcrumb}]\n---\n# Classic business rules\nBusiness rules run server-side scripts when records change.`;
+    const sources = ["markdown/api-reference/business-rules/c_BusinessRules.md", "markdown/build-workflows/business-rules/c_BusinessRules.md"].map((sourcePath, index) => {
+      const chunks = chunkDocument(sourcePath, page(index ? "Build workflows" : "API reference"), "australia", "australia");
+      return { path: sourcePath, blobSha: String(index), contentHash: chunks[0]!.contentHash, chunks };
+    });
+    database.replaceSources("australia", await Promise.all(sources.map(async (source) => ({ ...source, embeddings: await embedder.embed(source.chunks.map((chunk) => chunk.content)) }))), []);
+    const [queryVector] = await embedder.embed(["business rules"]);
+    expect(database.search("business rules", queryVector!, {}, 10, -1)).toHaveLength(1);
+    database.close();
+  });
+
+  it("matches inflected forms through porter stemming", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-porter-"));
+    temporaryDirectories.push(directory);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 2);
+    const [chunk] = chunkDocument("markdown/guides/schedules.md", "---\ntitle: Scheduling\n---\n# Scheduling\nThe job runs nightly.", "australia", "australia");
+    database.replaceSources("australia", [{ path: chunk!.sourcePath, blobSha: "one", contentHash: chunk!.contentHash, chunks: [chunk!], embeddings: [Float32Array.from([1, 0])] }], []);
+    expect(database.search("run nightly jobs", Float32Array.from([0, 1]), {}, 5, 0.99)[0]?.sourcePath).toBe(chunk!.sourcePath);
+    database.close();
+  });
+
+  it("returns the same semantic candidates from the in-memory binary index as from vec0", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-memory-index-"));
+    temporaryDirectories.push(directory);
+    const embedder = new HashEmbeddingProvider(32);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), embedder.dimensions);
+    const topics = ["incident assignment groups", "change approval policies", "knowledge article feedback", "service catalog variables", "discovery schedules and probes", "update set merging"];
+    const sources = await Promise.all(topics.map(async (topic, index) => {
+      const chunks = chunkDocument(`markdown/${index % 2 ? "itsm" : "platform"}/topic-${index}.md`, `---\ntitle: ${topic}\n---\n# ${topic}\nDetails about ${topic}.`, "australia", "australia");
+      return { path: chunks[0]!.sourcePath, blobSha: String(index), contentHash: chunks[0]!.contentHash, chunks, embeddings: await embedder.embed(chunks.map((chunk) => chunk.content)) };
+    }));
+    database.replaceSources("australia", sources, []);
+    const [queryVector] = await embedder.embed(["knowledge article feedback"]);
+    const search = (filters = {}) => database.search("absent", queryVector!, filters, 5, -1).map((result) => result.sourcePath);
+    const fromVec0 = search();
+    const filteredFromVec0 = search({ publication: "itsm" });
+    await database.warmUp();
+    expect(database.vectorIndexLoaded).toBe(true);
+    expect(search()).toEqual(fromVec0);
+    expect(search({ publication: "itsm" })).toEqual(filteredFromVec0);
+    expect(search({ publication: "missing" })).toEqual([]);
+    database.replaceSources("australia", [], [sources[0]!.path]);
+    expect(database.vectorIndexLoaded).toBe(false);
+    database.close();
+  });
 });
+

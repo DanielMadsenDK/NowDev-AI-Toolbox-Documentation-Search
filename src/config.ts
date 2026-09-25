@@ -7,20 +7,17 @@ const packageJson = createRequire(import.meta.url)("../package.json") as { name:
 export const PACKAGE_NAME = packageJson.name;
 export const PACKAGE_VERSION = packageJson.version;
 export const DEFAULT_FAMILY = "australia";
-export const DEFAULT_MODEL = "Xenova/bge-base-en-v1.5";
-export const DEFAULT_DIMENSIONS = 768;
-export const DEFAULT_POOLING = "cls";
 export const DEFAULT_DEVICE = "cpu";
-export const DEFAULT_DOCUMENT_PREFIX = "";
-export const DEFAULT_QUERY_PREFIX = "Represent this sentence for searching relevant passages: ";
 export const DEFAULT_MAX_EMBEDDING_CHARACTERS = 2048;
-export const SEARCH_SCHEMA_VERSION = 6;
+export const SEARCH_SCHEMA_VERSION = 7;
 
 export interface DocumentationSearchPaths {
   root: string;
   database: string;
   models: string;
   repository: string;
+  /** Content-addressed document embeddings; kept by reset-index so a rebuild reuses unchanged passages. */
+  embeddingCache: string;
 }
 
 export function defaultDataDirectory(): string {
@@ -40,5 +37,6 @@ export function resolvePaths(root = defaultDataDirectory()): DocumentationSearch
     database: path.join(absoluteRoot, "index.sqlite"),
     models: path.join(absoluteRoot, "models"),
     repository: path.join(absoluteRoot, "ServiceNowDocs"),
+    embeddingCache: path.join(absoluteRoot, "embedding-cache.sqlite"),
   };
 }

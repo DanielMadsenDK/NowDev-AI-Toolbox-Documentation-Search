@@ -2,8 +2,11 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chunkDocument } from "../src/chunker.js";
+import { SEARCH_SCHEMA_VERSION } from "../src/config.js";
 import { DocumentationSearchDatabase } from "../src/database.js";
 import { HashEmbeddingProvider } from "../src/embedder.js";
 import { removeDirectory } from "./helpers.js";
@@ -39,6 +42,7 @@ describe("nowdev-ai-toolbox-documentationsearch CLI", () => {
     ["embedding endpoint concurrency", ["--embedding-endpoint-concurrency", "0", "status"], "must be between 1 and 32"],
     ["embedding endpoint timeout", ["--embedding-endpoint-timeout", "0", "status"], "must be between 1 and 600"],
     ["vector oversample", ["--vector-oversample", "0", "status"], "must be between 1 and 64"],
+    ["embedding workers", ["--embedding-workers", "0", "status"], "must be between 1 and 64"],
     ["update concurrency", ["update", "--concurrency", "nope"], "concurrency must be an integer"],
     ["update limit", ["update", "--limit", "0"], "limit must be between 1 and 1000000"],
   ])("rejects malformed %s values as JSON", (_name, commandArguments, expected) => {
@@ -77,6 +81,53 @@ describe("nowdev-ai-toolbox-documentationsearch CLI", () => {
     const result = runCli(["--json", "--data-dir", dataDirectory, "status"]);
     expect(result.status).toBe(1);
     expect(JSON.parse(result.stderr)).toMatchObject({ error: expect.stringContaining("provider uses 384") });
+  });
+
+  it("saves index vectors to the embedding cache on reset-index, and clears the cache on request", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-cli-reset-"));
+    try {
+      const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 64);
+      const embedder = new HashEmbeddingProvider(64);
+      const sourcePath = "markdown/itsm/incidents.md";
+      const chunks = chunkDocument(sourcePath, "---\ntitle: Incidents\n---\n# Incidents\nHandle interruptions.", "australia", "australia");
+      database.replaceSources("australia", [{ path: sourcePath, blobSha: "sha", contentHash: "hash", chunks, embeddings: await embedder.embed(chunks.map((chunk) => chunk.content)) }], [], {
+        schemaVersion: SEARCH_SCHEMA_VERSION, family: "australia", branch: "australia", embeddingProvider: embedder.name, embeddingModel: embedder.model,
+        dimensions: embedder.dimensions, pooling: embedder.pooling, normalized: true, updatedAt: new Date().toISOString(),
+      });
+      database.close();
+      const cachePath = path.join(directory, "embedding-cache.sqlite");
+
+      const reset = runCli(["--json", "--data-dir", directory, "reset-index", "--yes"]);
+      expect(reset.status).toBe(0);
+      expect(JSON.parse(reset.stdout)).toMatchObject({ preserved: expect.arrayContaining([cachePath]), embeddingCache: { harvested: chunks.length, vectors: chunks.length } });
+      expect(fs.existsSync(path.join(directory, "index.sqlite"))).toBe(false);
+      expect(fs.existsSync(cachePath)).toBe(true);
+
+      const cleared = runCli(["--json", "--data-dir", directory, "reset-index", "--yes", "--clear-embedding-cache"]);
+      expect(cleared.status).toBe(0);
+      expect(JSON.parse(cleared.stdout)).toMatchObject({ embeddingCache: { removed: cachePath } });
+      expect(JSON.parse(cleared.stdout).preserved).not.toContain(cachePath);
+      expect(fs.existsSync(cachePath)).toBe(false);
+    } finally {
+      await removeDirectory(directory);
+    }
+  });
+
+  it("starts the MCP server from its dedicated entry point", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-mcp-entry-"));
+    const client = new Client({ name: "cli-test", version: "1.0.0" });
+    try {
+      await client.connect(new StdioClientTransport({
+        command: process.execPath,
+        args: [path.resolve("dist/mcp-entry.js")],
+        env: { ...process.env, NOWDEV_AI_TOOLBOX_DOCUMENTATIONSEARCH_HOME: directory } as Record<string, string>,
+        stderr: "ignore",
+      }));
+      expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("search_servicenow_docs");
+    } finally {
+      await client.close();
+      await removeDirectory(directory);
+    }
   });
 
   it("requires endpoint URL and model together", () => {
