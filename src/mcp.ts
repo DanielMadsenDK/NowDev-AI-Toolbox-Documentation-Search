@@ -3,15 +3,37 @@ import { fileURLToPath } from "node:url";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { PACKAGE_NAME, PACKAGE_VERSION } from "./config.js";
-import { DocumentationSearch } from "./service-context.js";
-import type { SearchResult } from "./types.js";
+import {
+	DEFAULT_FAMILY,
+	DEFAULT_MAX_RESULTS_PER_SOURCE,
+	DEFAULT_SEARCH_LIMIT,
+	DEFAULT_SIMILARITY_THRESHOLD,
+	MAX_DOWNLOAD_CONCURRENCY,
+	MAX_RESULTS_PER_SOURCE,
+	MAX_SEARCH_LIMIT,
+	PACKAGE_NAME,
+	PACKAGE_VERSION,
+} from "./config.js";
+import { DocumentationSearch, type DocumentationSearchOptions } from "./service-context.js";
+import { CHUNK_TYPES, DOC_TYPES, DOCUMENTATION_AREAS, type SearchResult } from "./types.js";
 
 // Compact JSON: indentation only costs the calling model tokens.
 function result(value: unknown) {
 	return {
 		content: [{ type: "text" as const, text: JSON.stringify(value) }],
 	};
+}
+
+// Tool failures are reported in the result, not thrown, so the calling model sees them and can correct its request.
+function errorResult(message: string) {
+	return {
+		isError: true,
+		content: [{ type: "text" as const, text: message }],
+	};
+}
+
+function notIndexedMessage(sourcePath: string, release: string | undefined): string {
+	return `No indexed document ${sourcePath}${release ? ` in release ${release}` : ""}. Use a sourcePath exactly as returned by search_servicenow_docs.`;
 }
 
 type CompactSearchResult = Omit<SearchResult, "metadata" | "contentHash" | "context"> & {
@@ -33,6 +55,8 @@ export const MCP_TOOL_DESCRIPTIONS = {
 	status: "Inspect local index size, indexed releases, location, and embedding configuration. Call before release-specific searches or before initializing/updating an index.",
 	update: "Download and incrementally index public ServiceNowDocs content. This mutates the local index; use only when requested. Use limit for a smoke test, avoid refresh for routine updates, and inspect failures before relying on complete coverage.",
 } as const;
+
+export const MCP_SERVER_INSTRUCTIONS = "Local index of the public ServiceNow documentation. Call get_documentation_search_status first to see which releases are indexed. Search with the user's own wording and a release filter, inspect those results, then refine: for scripting tasks search again with the API object and method you expect, with docType \"scripting-api\"; for described features search with the feature's ServiceNow name. Read a promising result's outline before fetching the full document, and cite the release and sourceUrl in answers. Only call update_servicenow_docs when the user asks for it.";
 
 function breadcrumbText(value: unknown): string | undefined {
 	if (!Array.isArray(value)) return undefined;
@@ -71,24 +95,25 @@ const searchResultSchema = z.looseObject({
 	metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
-export async function startMcpServer(dataDirectory?: string): Promise<void> {
-	const context = new DocumentationSearch({ dataDirectory: dataDirectory ?? process.env.NOWDEV_AI_TOOLBOX_DOCUMENTATIONSEARCH_HOME });
-	const server = new McpServer({ name: PACKAGE_NAME, version: PACKAGE_VERSION });
+/** Builds an MCP server whose tools and resources read from (and update) the given index. */
+export function createMcpServer(context: DocumentationSearch): McpServer {
+	const server = new McpServer({ name: PACKAGE_NAME, version: PACKAGE_VERSION }, { instructions: MCP_SERVER_INSTRUCTIONS });
+	let updating = false;
 
 	server.registerTool("search_servicenow_docs", {
 		title: "Search ServiceNow documentation",
 		description: MCP_TOOL_DESCRIPTIONS.search,
 		inputSchema: z.object({
 			query: z.string().min(1),
-			limit: z.number().int().min(1).max(50).default(10),
-			threshold: z.number().min(-1).max(1).default(0.3).describe("Minimum cosine similarity; exact API object and method keyword matches are retained below this value"),
+			limit: z.number().int().min(1).max(MAX_SEARCH_LIMIT).default(DEFAULT_SEARCH_LIMIT),
+			threshold: z.number().min(-1).max(1).default(DEFAULT_SIMILARITY_THRESHOLD).describe("Minimum cosine similarity; exact API object and method keyword matches are retained below this value"),
 			deduplicateReleases: z.boolean().default(false),
-			maxResultsPerSource: z.number().int().min(1).max(10).default(3),
+			maxResultsPerSource: z.number().int().min(1).max(MAX_RESULTS_PER_SOURCE).default(DEFAULT_MAX_RESULTS_PER_SOURCE),
 			rerank: z.boolean().default(false).describe("Rescore the top candidates with a local cross-encoder; adds several hundred milliseconds"),
 			release: z.string().optional(),
-			docType: z.enum(["scripting-api", "rest-api", "scripting-guide", "developer-guide", "product-doc", "release-notes", "glossary"]).optional(),
+			docType: z.enum(DOC_TYPES).optional(),
 			publication: z.string().optional(),
-			chunkType: z.enum(["overview", "section", "method", "endpoint", "parameter", "returns", "example", "definition"]).optional(),
+			chunkType: z.enum(CHUNK_TYPES).optional(),
 			topicType: z.string().optional(),
 			includeMetadata: z.boolean().default(false).describe("Include detailed source metadata such as API parameters and examples. Omit for compact agent-oriented results."),
 		}),
@@ -111,8 +136,14 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 		description: "Complete indexed chunks for one ServiceNowDocs source path in one release, as returned by get_servicenow_document.",
 		mimeType: "application/json",
 	}, async (uri, { release, sourcePath }) => {
-		const [releaseValue, pathValue] = [release, sourcePath].map((value) => decodeURIComponent(Array.isArray(value) ? value.join("/") : String(value)));
-		const chunks = context.getDocument(pathValue!, releaseValue);
+		let releaseValue: string;
+		let pathValue: string;
+		try {
+			[releaseValue, pathValue] = [release, sourcePath].map((value) => decodeURIComponent(Array.isArray(value) ? value.join("/") : String(value))) as [string, string];
+		} catch {
+			throw new Error(`Invalid document URI ${uri.href}`);
+		}
+		const chunks = context.getDocument(pathValue, releaseValue);
 		if (!chunks.length) throw new Error(`No indexed document ${pathValue} in release ${releaseValue}`);
 		return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(chunks) }] };
 	});
@@ -122,14 +153,20 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 		description: MCP_TOOL_DESCRIPTIONS.document,
 		inputSchema: z.object({ sourcePath: z.string().min(1), release: z.string().optional() }),
 		annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
-	}, async ({ sourcePath, release }) => result(context.getDocument(sourcePath, release)));
+	}, async ({ sourcePath, release }) => {
+		const chunks = context.getDocument(sourcePath, release);
+		return chunks.length ? result(chunks) : errorResult(notIndexedMessage(sourcePath, release));
+	});
 
 	server.registerTool("get_servicenow_document_outline", {
 		title: "Get ServiceNow document outline",
 		description: MCP_TOOL_DESCRIPTIONS.outline,
 		inputSchema: z.object({ sourcePath: z.string().min(1), release: z.string().optional() }),
 		annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
-	}, async ({ sourcePath, release }) => result(context.getDocumentOutline(sourcePath, release)));
+	}, async ({ sourcePath, release }) => {
+		const outline = context.getDocumentOutline(sourcePath, release);
+		return outline.length ? result(outline) : errorResult(notIndexedMessage(sourcePath, release));
+	});
 
 	server.registerTool("list_servicenow_publications", {
 		title: "List ServiceNow publications",
@@ -149,15 +186,18 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 		title: "Update ServiceNow documentation",
 		description: MCP_TOOL_DESCRIPTIONS.update,
 		inputSchema: z.object({
-			family: z.string().default("australia"),
+			family: z.string().default(DEFAULT_FAMILY),
 			branch: z.string().optional(),
-			area: z.enum(["all-docs", "scripting", "server", "client", "scripts"]).default("all-docs"),
+			area: z.enum(DOCUMENTATION_AREAS).default("all-docs"),
 			refresh: z.boolean().default(false),
 			limit: z.number().int().positive().optional(),
-			concurrency: z.number().int().min(1).max(64).optional(),
+			concurrency: z.number().int().min(1).max(MAX_DOWNLOAD_CONCURRENCY).optional(),
 		}),
-		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+		// Not idempotent or merely additive: an update removes sources deleted upstream and records a new manifest.
+		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
 	}, async (options, extra) => {
+		// Two updates writing the same index would each compute changes from a stale snapshot and race their writes.
+		if (updating) return errorResult("An update is already running for this index; wait for it to finish.");
 		const progressToken = extra._meta?.progressToken;
 		let progress = 0;
 		// Indexing a full family takes a long time; progress notifications keep clients informed and their request timers reset.
@@ -165,15 +205,46 @@ export async function startMcpServer(dataDirectory?: string): Promise<void> {
 			progress += 1;
 			void extra.sendNotification({ method: "notifications/progress", params: { progressToken, progress, message } }).catch(() => undefined);
 		};
-		return result(await context.update({ ...options, onProgress }));
+		updating = true;
+		try {
+			// A cancelled request stops between documents; what was committed before then stays indexed.
+			return result(await context.update({ ...options, onProgress, signal: extra.signal }));
+		} catch (error) {
+			if (extra.signal.aborted) return errorResult("The update was cancelled; documents indexed before cancellation were kept.");
+			throw error;
+		} finally {
+			updating = false;
+		}
 	});
 
-	const shutdown = async () => {
-		context.close();
-		await server.close();
+	return server;
+}
+
+/** Serves the index over stdio until the client disconnects or the process is signalled. */
+export async function startMcpServer(options: DocumentationSearchOptions = {}): Promise<void> {
+	const context = new DocumentationSearch(options);
+	const server = createMcpServer(context);
+	let shuttingDown = false;
+	const shutdown = () => {
+		if (shuttingDown) return;
+		shuttingDown = true;
+		void (async () => {
+			try {
+				// The server stops taking requests before the index and models it serves from are released.
+				await server.close();
+			} finally {
+				await context.close();
+				process.exit(0);
+			}
+		})();
 	};
-	process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
-	process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
+	process.once("SIGINT", shutdown);
+	process.once("SIGTERM", shutdown);
+	// The client closing stdin is the normal end of a stdio session; without this, worker threads and model sessions
+	// could keep an orphaned server alive.
+	process.stdin.once("end", shutdown);
+	process.stdin.once("close", shutdown);
+	server.server.onclose = shutdown;
 	await server.connect(new StdioServerTransport());
 	// Loads the query model and the in-memory vector index in the background so the first search is fast.
 	if (context.database.stats().chunks) void context.warmUp().catch((error: unknown) => console.error(`Warm-up failed: ${error instanceof Error ? error.message : String(error)}`));

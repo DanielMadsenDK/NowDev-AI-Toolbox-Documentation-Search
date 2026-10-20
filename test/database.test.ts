@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { chunkDocument } from "../src/chunker.js";
 import { DocumentationSearchDatabase } from "../src/database.js";
@@ -290,5 +291,72 @@ run("value");
     expect(database.vectorIndexLoaded).toBe(false);
     database.close();
   });
-});
 
+  it("caps the vec0 KNN request at sqlite-vec's limit for large oversampling", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-knn-limit-"));
+    temporaryDirectories.push(directory);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 8, 64);
+    const [chunk] = chunkDocument("markdown/guides/first.md", "# First\nNearest content.", "australia", "australia");
+    database.replaceSources("australia", [{ path: chunk!.sourcePath, blobSha: "first", contentHash: chunk!.contentHash, chunks: [chunk!], embeddings: [Float32Array.from([1, 0, 0, 0, 0, 0, 0, 0])] }], []);
+    // limit 50 asks for 500 semantic candidates; at 64x oversampling that is 32,000 neighbours, above vec0's 4,096.
+    expect(database.vectorIndexLoaded).toBe(false);
+    expect(database.search("unrelated", Float32Array.from([1, 0, 0, 0, 0, 0, 0, 0]), { release: "australia" }, 50, 0)[0]?.sourcePath).toBe(chunk!.sourcePath);
+    database.close();
+  });
+
+  it("loads the vector index on a warm-up after a write interrupted the previous one", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-warmup-"));
+    temporaryDirectories.push(directory);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 8);
+    const [first] = chunkDocument("markdown/guides/first.md", "# First\nNearest content.", "australia", "australia");
+    const [second] = chunkDocument("markdown/guides/second.md", "# Second\nOther content.", "australia", "australia");
+    database.replaceSources("australia", [{ path: first!.sourcePath, blobSha: "first", contentHash: first!.contentHash, chunks: [first!], embeddings: [Float32Array.from([1, 0, 0, 0, 0, 0, 0, 0])] }], []);
+    const interrupted = database.warmUp();
+    database.replaceSources("australia", [{ path: second!.sourcePath, blobSha: "second", contentHash: second!.contentHash, chunks: [second!], embeddings: [Float32Array.from([0, 1, 0, 0, 0, 0, 0, 0])] }], []);
+    await interrupted;
+    expect(database.vectorIndexLoaded).toBe(false);
+    await database.warmUp();
+    expect(database.vectorIndexLoaded).toBe(true);
+    expect(database.search("unrelated", Float32Array.from([0, 1, 0, 0, 0, 0, 0, 0]), { release: "australia" }, 1, 0.9)[0]?.sourcePath).toBe(second!.sourcePath);
+    database.close();
+  });
+
+  it("finds a document by path alone through the path index", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-path-lookup-"));
+    temporaryDirectories.push(directory);
+    const database = new DocumentationSearchDatabase(path.join(directory, "index.sqlite"), 2);
+    const sourcePath = "markdown/itsm/incidents.md";
+    for (const release of ["australia", "zurich"]) {
+      const chunks = chunkDocument(sourcePath, `---\ntitle: Incidents\n---\n# Incidents\nIncidents in ${release}.`, release, release);
+      database.replaceSources(release, [{ path: sourcePath, blobSha: release, contentHash: chunks[0]!.contentHash, chunks, embeddings: chunks.map(() => Float32Array.from([1, 0])) }], []);
+    }
+    expect(database.getDocument(sourcePath)[0]?.release).toBe("zurich");
+    expect(database.getSourceContent(sourcePath)).toContain("Incidents in zurich");
+    const plan = database.db.prepare("EXPLAIN QUERY PLAN SELECT content FROM sources WHERE source_path = ? ORDER BY release DESC LIMIT 1").all(sourcePath) as Array<{ detail: string }>;
+    expect(plan.map((row) => row.detail).join(" ")).toContain("idx_sources_source_path");
+    database.close();
+  });
+
+  it("opens an existing index without waiting for another connection's write lock", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-open-locked-"));
+    temporaryDirectories.push(directory);
+    const filename = path.join(directory, "index.sqlite");
+    const setup = new DocumentationSearchDatabase(filename, 8);
+    setup.setEmbeddingProfile("all-minilm-l6-v2");
+    setup.close();
+    const writer = new DatabaseSync(filename, { timeout: 0 });
+    writer.exec("BEGIN IMMEDIATE");
+    try {
+      const started = performance.now();
+      const reader = new DocumentationSearchDatabase(filename, 8);
+      // Storing the value the index already holds is not a write.
+      reader.setEmbeddingProfile("all-minilm-l6-v2");
+      expect(reader.stats().chunks).toBe(0);
+      reader.close();
+      expect(performance.now() - started).toBeLessThan(1_000);
+    } finally {
+      writer.exec("ROLLBACK");
+      writer.close();
+    }
+  });
+});

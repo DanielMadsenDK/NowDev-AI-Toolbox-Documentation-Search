@@ -1,15 +1,26 @@
 #!/usr/bin/env node
-import { Command, InvalidArgumentError, Option } from "commander";
+import { Command, CommanderError, InvalidArgumentError, Option } from "commander";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_MAX_EMBEDDING_CHARACTERS, PACKAGE_VERSION } from "./config.js";
-import { resolvePaths } from "./config.js";
+import {
+	DEFAULT_DOWNLOAD_CONCURRENCY,
+	DEFAULT_FAMILY,
+	DEFAULT_MAX_EMBEDDING_CHARACTERS,
+	DEFAULT_MAX_RESULTS_PER_SOURCE,
+	DEFAULT_SEARCH_LIMIT,
+	DEFAULT_SIMILARITY_THRESHOLD,
+	MAX_DOWNLOAD_CONCURRENCY,
+	MAX_RESULTS_PER_SOURCE,
+	MAX_SEARCH_LIMIT,
+	PACKAGE_VERSION,
+	resolvePaths,
+} from "./config.js";
 import { harvestIndexEmbeddings, type HarvestResult } from "./embedding-cache.js";
 import { EMBEDDING_DTYPES, HashEmbeddingProvider, type EmbeddingDevice, type TransformersEmbeddingOptions } from "./embedder.js";
 import { DEFAULT_EMBEDDING_PROFILE, EMBEDDING_PROFILES, type EmbeddingProfileName } from "./embedding-profiles.js";
-import { DocumentationSearch } from "./service-context.js";
-import type { ChunkType, DocType } from "./types.js";
+import { DocumentationSearch, type DocumentationSearchOptions } from "./service-context.js";
+import { CHUNK_TYPES, DOC_TYPES, DOCUMENTATION_AREAS, type ChunkType, type DocType, type DocumentationArea } from "./types.js";
 
 interface GlobalOptions {
 	dataDir?: string;
@@ -54,7 +65,7 @@ function numberOption(name: string, minimum: number, maximum: number) {
 	};
 }
 
-function createContext(command: Command): DocumentationSearch {
+function contextOptions(command: Command): DocumentationSearchOptions {
 	const options = command.optsWithGlobals<GlobalOptions>();
 	if (Boolean(options.embeddingEndpoint) !== Boolean(options.embeddingEndpointModel)) {
 		throw new Error("--embedding-endpoint and --embedding-endpoint-model must be specified together");
@@ -66,7 +77,7 @@ function createContext(command: Command): DocumentationSearch {
 	if (options.embeddingEndpoint && !endpointApiKey) {
 		throw new Error(`Embedding API key environment variable ${options.embeddingApiKeyEnv} is not set`);
 	}
-	return new DocumentationSearch({
+	return {
 		dataDirectory: options.dataDir,
 		embeddingDevice: options.device,
 		embeddingDtype: options.embeddingDtype,
@@ -86,7 +97,7 @@ function createContext(command: Command): DocumentationSearch {
 		embeddingEndpointTimeoutMilliseconds: options.embeddingEndpointTimeout === undefined ? undefined : options.embeddingEndpointTimeout * 1000,
 		vectorOversample: options.vectorOversample,
 		embeddingProvider: options.deterministicEmbeddings ? new HashEmbeddingProvider() : undefined,
-	});
+	};
 }
 
 function output(command: Command, value: unknown): void {
@@ -96,21 +107,21 @@ function output(command: Command, value: unknown): void {
 }
 
 async function withContext(command: Command, action: (context: DocumentationSearch) => Promise<void> | void): Promise<void> {
-	const context = createContext(command);
+	const context = new DocumentationSearch(contextOptions(command));
 	try {
 		await action(context);
 	} finally {
-		context.close();
+		await context.close();
 	}
 }
 
 function addUpdateOptions(command: Command): Command {
 	return command
-		.option("-f, --family <family>", "ServiceNow family release", "australia")
+		.option("-f, --family <family>", "ServiceNow family release", DEFAULT_FAMILY)
 		.option("-b, --branch <branch>", "Git branch (defaults to family)")
-		.option("-a, --area <area>", "all-docs, scripting, server, client, or scripts", "all-docs")
+		.addOption(new Option("-a, --area <area>", "documentation subset to index").choices(DOCUMENTATION_AREAS).default("all-docs" satisfies DocumentationArea))
 		.option("--refresh", "re-download and re-index every discovered source")
-		.option("--concurrency <count>", "concurrent downloads", integerOption("concurrency", 1, 64), 8)
+		.option("--concurrency <count>", "concurrent downloads", integerOption("concurrency", 1, MAX_DOWNLOAD_CONCURRENCY), DEFAULT_DOWNLOAD_CONCURRENCY)
 		.option("--limit <count>", "limit sources for a smoke test", integerOption("limit", 1, 1_000_000));
 }
 
@@ -137,13 +148,9 @@ const program = new Command()
 	.option("--embedding-endpoint-concurrency <count>", "concurrent remote embedding requests (default: 4)", integerOption("embedding-endpoint-concurrency", 1, 32))
 	.option("--embedding-endpoint-timeout <seconds>", "remote request timeout before retrying (default: 30)", integerOption("embedding-endpoint-timeout", 1, 600))
 	.option("--vector-oversample <count>", "binary vector coarse candidates per final candidate (default: 4)", integerOption("vector-oversample", 1, 64))
-	.configureOutput({
-		outputError: (message, write) => {
-			if (process.argv.includes("--json")) write(`${JSON.stringify({ error: message.trim().replace(/^error:\s*/, "") })}\n`);
-			else write(message);
-		},
-	})
-	.showHelpAfterError(!process.argv.includes("--json"));
+	// Parse errors are reported once, by the handler at the end, after the global options (and so --json) are known.
+	.exitOverride()
+	.configureOutput({ outputError: () => undefined });
 
 for (const commandName of ["init", "update"] as const) {
 	addUpdateOptions(program.command(commandName).description(commandName === "init" ? "Initialize a local documentation index" : "Incrementally update a local documentation index"))
@@ -165,15 +172,15 @@ for (const commandName of ["init", "update"] as const) {
 program.command("search")
 	.description("Run hybrid semantic and full-text search")
 	.argument("<query>", "natural-language search query")
-	.option("-n, --limit <count>", "maximum results", integerOption("limit", 1, 50), 10)
+	.option("-n, --limit <count>", "maximum results", integerOption("limit", 1, MAX_SEARCH_LIMIT), DEFAULT_SEARCH_LIMIT)
 	.option("-f, --family <family>", "filter by family release")
-	.option("--doc-type <type>", "filter by document type")
+	.addOption(new Option("--doc-type <type>", "filter by document type").choices(DOC_TYPES))
 	.option("--publication <publication>", "filter by publication")
-	.option("--chunk-type <type>", "filter by chunk type")
+	.addOption(new Option("--chunk-type <type>", "filter by chunk type").choices(CHUNK_TYPES))
 	.option("--topic-type <type>", "filter by topic type")
-	.option("--threshold <number>", "minimum cosine similarity for semantic candidates; lexical matches remain eligible", numberOption("threshold", -1, 1), 0.3)
+	.option("--threshold <number>", "minimum cosine similarity for semantic candidates; lexical matches remain eligible", numberOption("threshold", -1, 1), DEFAULT_SIMILARITY_THRESHOLD)
 	.option("--deduplicate-releases", "return only the best-scoring release of each source chunk")
-	.option("--max-per-source <count>", "maximum results from one source document", integerOption("max-per-source", 1, 10), 3)
+	.option("--max-per-source <count>", "maximum results from one source document", integerOption("max-per-source", 1, MAX_RESULTS_PER_SOURCE), DEFAULT_MAX_RESULTS_PER_SOURCE)
 	.option("--rerank", "rescore the top candidates with a local cross-encoder (downloads a small model on first use)")
 	.action(async (query, options, command) => withContext(command, async (context) => {
 		output(command, await context.search(query, {
@@ -242,13 +249,22 @@ program.command("skill")
 
 program.command("mcp")
 	.description("Start the stdio MCP server")
-	.action(async () => {
+	.action(async (_options, command) => {
 		const { startMcpServer } = await import("./mcp.js");
-		await startMcpServer(program.opts<GlobalOptions>().dataDir);
+		await startMcpServer(contextOptions(command));
 	});
 
 program.parseAsync().catch((error: unknown) => {
+	// Help and --version also arrive here, as CommanderErrors that already printed their output and exit with code 0.
+	if (error instanceof CommanderError && error.exitCode === 0) return;
+	const parseError = error instanceof CommanderError;
 	const message = error instanceof Error ? error.message : String(error);
-	console.error(process.argv.includes("--json") ? JSON.stringify({ error: message }) : message);
-	process.exitCode = 1;
+	// A parse error can stop option processing before --json is reached, so only then is argv consulted directly.
+	if (program.opts<GlobalOptions>().json || (parseError && process.argv.includes("--json"))) {
+		console.error(JSON.stringify({ error: message.replace(/^error:\s*/, "") }));
+	} else {
+		console.error(message);
+		if (parseError) console.error("(add --help for additional information)");
+	}
+	process.exitCode = parseError ? error.exitCode : 1;
 });

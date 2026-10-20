@@ -1,17 +1,11 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import YAML from "yaml";
-import { DEFAULT_MAX_EMBEDDING_CHARACTERS } from "./config.js";
+import { API_REFERENCE_PREFIXES, DEFAULT_MAX_EMBEDDING_CHARACTERS, TOP_LEVEL_API_PATH } from "./config.js";
 import type { ChunkType, DocType, DocumentChunk } from "./types.js";
 
-const API_PREFIXES = [
-  "markdown/api-reference/server-api-reference/",
-  "markdown/api-reference/cllent-mobile-api-reference/",
-  "markdown/api-reference/ui-builder-api-reference/",
-  "markdown/api-reference/rest-apis/",
-];
+const API_PREFIXES = [API_REFERENCE_PREFIXES.server, API_REFERENCE_PREFIXES.clientMobile, API_REFERENCE_PREFIXES.uiBuilder, API_REFERENCE_PREFIXES.rest];
 const GLOSSARY_PREFIX = "markdown/glossary/";
-const TOP_LEVEL_API = /^markdown\/api-reference\/[^/]+\.md$/;
 const METHOD_HEADING = /^##\s+(.+?)(?:\s+[-–—]\s*|\s*[-–—]\s+)(.+?)\s*$/;
 const CODE_FENCE = /```[\w+-]*\n([\s\S]*?)\n```/g;
 
@@ -136,7 +130,7 @@ function publicationFromPath(sourcePath: string): string {
 
 export function classifyDocType(sourcePath: string): DocType {
   if (sourcePath.startsWith("markdown/api-reference/rest-apis/")) return "rest-api";
-  if (API_PREFIXES.some((prefix) => sourcePath.startsWith(prefix)) || TOP_LEVEL_API.test(sourcePath)) return "scripting-api";
+  if (API_PREFIXES.some((prefix) => sourcePath.startsWith(prefix)) || TOP_LEVEL_API_PATH.test(sourcePath)) return "scripting-api";
   if (sourcePath.startsWith(GLOSSARY_PREFIX)) return "glossary";
   if (sourcePath.startsWith("markdown/release-notes/")) return "release-notes";
   if (sourcePath.startsWith("markdown/api-reference/scripts/")) return "scripting-guide";
@@ -156,14 +150,7 @@ function extractTitle(body: string, frontmatter: Frontmatter): string {
 function cleanCell(value: string): string {
   // Tags are stripped before entities are decoded: once "&lt;"/"&gt;" become literal < >,
   // a later <[^>]+> pass would misread them as real tag delimiters and eat everything between.
-  return value
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, "\"")
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, "&")
+  return decodeEntities(value.replace(/<[^>]+>/g, " "))
     .replace(/[ \t]+/g, " ")
     .trim();
 }
@@ -421,8 +408,11 @@ export function splitChunkText(body: string, maxCharacters = MAX_CHUNK_CHARACTER
   if (chunks.length <= 1) return chunks.length ? chunks : [""];
   return chunks.map((chunk, index) => {
     if (index === 0) return chunk;
-    const previousTail = overlapTail(chunks[index - 1]!, OVERLAP_CHARACTERS);
-    return previousTail ? `${previousTail}\n\n${chunk}`.slice(0, maxCharacters) : chunk;
+    // The overlap is shortened to the room the chunk leaves within the budget, so it never pushes the chunk's own text out.
+    const room = maxCharacters - chunk.length - 2;
+    const fullTail = overlapTail(chunks[index - 1]!, OVERLAP_CHARACTERS);
+    const previousTail = fullTail.length <= room ? fullTail : room > 0 ? overlapTail(chunks[index - 1]!, room) : "";
+    return previousTail ? `${previousTail}\n\n${chunk}` : chunk;
   });
 }
 
@@ -662,7 +652,7 @@ function chunkGlossary(sourcePath: string, markdown: string, branch: string, fam
 }
 
 export function chunkDocument(sourcePath: string, markdown: string, branch: string, family: string, maxCharacters = MAX_CHUNK_CHARACTERS): DocumentChunk[] {
-  if (API_PREFIXES.some((prefix) => sourcePath.startsWith(prefix)) || TOP_LEVEL_API.test(sourcePath)) return chunkApiDoc(sourcePath, markdown, branch, family, maxCharacters);
+  if (API_PREFIXES.some((prefix) => sourcePath.startsWith(prefix)) || TOP_LEVEL_API_PATH.test(sourcePath)) return chunkApiDoc(sourcePath, markdown, branch, family, maxCharacters);
   if (sourcePath.startsWith(GLOSSARY_PREFIX)) return chunkGlossary(sourcePath, markdown, branch, family);
   return chunkTopicDoc(sourcePath, markdown, branch, family, maxCharacters);
 }

@@ -10,5 +10,5 @@
     "noUncheckedIndexedAccess": true,
     "outDir": "dist"
   },
-  "include": ["src", "test", "tsup.config.ts"]
+  "include": ["src", "test", "tsup.config.ts", "vitest.config.ts"]
 }

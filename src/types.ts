@@ -1,21 +1,12 @@
-export type DocType =
-  | "scripting-api"
-  | "rest-api"
-  | "scripting-guide"
-  | "developer-guide"
-  | "product-doc"
-  | "release-notes"
-  | "glossary";
+export const DOC_TYPES = ["scripting-api", "rest-api", "scripting-guide", "developer-guide", "product-doc", "release-notes", "glossary"] as const;
+export type DocType = typeof DOC_TYPES[number];
 
-export type ChunkType =
-  | "overview"
-  | "section"
-  | "method"
-  | "endpoint"
-  | "parameter"
-  | "returns"
-  | "example"
-  | "definition";
+export const CHUNK_TYPES = ["overview", "section", "method", "endpoint", "parameter", "returns", "example", "definition"] as const;
+export type ChunkType = typeof CHUNK_TYPES[number];
+
+/** Subsets of ServiceNowDocs an update can index. */
+export const DOCUMENTATION_AREAS = ["all-docs", "scripting", "server", "client", "scripts"] as const;
+export type DocumentationArea = typeof DOCUMENTATION_AREAS[number];
 
 export interface DocumentChunk {
   id?: number;

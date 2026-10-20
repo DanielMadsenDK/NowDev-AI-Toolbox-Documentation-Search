@@ -1,5 +1,18 @@
 import { chunkDocument, contentHash } from "./chunker.js";
-import { DEFAULT_FAMILY, DEFAULT_MAX_EMBEDDING_CHARACTERS, resolvePaths, SEARCH_SCHEMA_VERSION, type DocumentationSearchPaths } from "./config.js";
+import {
+  DEFAULT_DOWNLOAD_CONCURRENCY,
+  DEFAULT_FAMILY,
+  DEFAULT_MAX_EMBEDDING_CHARACTERS,
+  DEFAULT_MAX_RESULTS_PER_SOURCE,
+  DEFAULT_SEARCH_LIMIT,
+  DEFAULT_SIMILARITY_THRESHOLD,
+  MAX_DOWNLOAD_CONCURRENCY,
+  MAX_RESULTS_PER_SOURCE,
+  MAX_SEARCH_LIMIT,
+  resolvePaths,
+  SEARCH_SCHEMA_VERSION,
+  type DocumentationSearchPaths,
+} from "./config.js";
 import { DocumentationSearchDatabase, readStoredDimensions, readStoredEmbeddingDtype, readStoredEmbeddingProfile } from "./database.js";
 import { EmbeddingCache, embeddingCacheSize, embeddingTextHash } from "./embedding-cache.js";
 import { DEFAULT_EMBEDDING_PROFILE, embeddingProfile, isEmbeddingProfileName, type EmbeddingProfileName } from "./embedding-profiles.js";
@@ -43,6 +56,8 @@ export interface UpdateOptions {
   concurrency?: number;
   limit?: number;
   onProgress?: (message: string) => void;
+  /** Stops the update between documents and embedding groups; everything committed before then stays indexed. */
+  signal?: AbortSignal;
 }
 
 async function mapConcurrent<T, R>(items: T[], concurrency: number, action: (item: T, index: number) => Promise<R>): Promise<R[]> {
@@ -134,6 +149,7 @@ export class DocumentationSearch {
   readonly reranker: Reranker | null;
   readonly embeddingCacheEnabled: boolean;
   private readonly queryEmbeddings = new Map<string, Promise<Float32Array>>();
+  private closing?: Promise<void>;
 
   constructor(options: DocumentationSearchOptions = {}) {
     this.paths = resolvePaths(options.dataDirectory);
@@ -230,9 +246,18 @@ export class DocumentationSearch {
     }
   }
 
-  close(): void {
-    this.database.close();
-    void this.embeddings.dispose?.();
+  /**
+   * Closes the index and releases the embedding and reranker models. The database closes before this returns, so
+   * callers that don't await it can still reopen the index right away. Safe to call more than once.
+   */
+  close(): Promise<void> {
+    if (!this.closing) {
+      this.database.close();
+      // Model teardown is best-effort: a failure to release a session must not turn a clean shutdown into an error.
+      this.closing = Promise.all([this.embeddings.dispose?.(), this.reranker?.dispose?.()].map((disposal) => Promise.resolve(disposal).catch(() => undefined)))
+        .then(() => undefined);
+    }
+    return this.closing;
   }
 
   /**
@@ -265,8 +290,8 @@ export class DocumentationSearch {
   }
 
   async update(options: UpdateOptions = {}): Promise<UpdateResult> {
-    if (options.concurrency !== undefined && (!Number.isInteger(options.concurrency) || options.concurrency < 1 || options.concurrency > 64)) {
-      throw new Error("concurrency must be an integer between 1 and 64");
+    if (options.concurrency !== undefined && (!Number.isInteger(options.concurrency) || options.concurrency < 1 || options.concurrency > MAX_DOWNLOAD_CONCURRENCY)) {
+      throw new Error(`concurrency must be an integer between 1 and ${MAX_DOWNLOAD_CONCURRENCY}`);
     }
     if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1)) {
       throw new Error("limit must be a positive integer");
@@ -276,6 +301,8 @@ export class DocumentationSearch {
     const branch = options.branch ?? family;
     const area = options.area ?? "all-docs";
     const progress = options.onProgress ?? (() => undefined);
+    const signal = options.signal;
+    signal?.throwIfAborted();
     if (this.embeddings.device === "webgpu" && this.embeddings.dtype === "q8") {
       progress("This index uses q8 embeddings, which run slower on WebGPU than on the CPU. For GPU indexing, build a separate fp16 index (a new data directory with --device webgpu).");
     }
@@ -308,7 +335,8 @@ export class DocumentationSearch {
     };
     progress(`${changed.length} changed, ${deleted.length} deleted; preparing chunks...`);
     let processed = 0;
-    const parseEntries = (sourceEntries: SourceEntry[]) => mapConcurrent(sourceEntries, options.concurrency ?? 8, async (entry: SourceEntry): Promise<ParseResult> => {
+    const parseEntries = (sourceEntries: SourceEntry[]) => mapConcurrent(sourceEntries, options.concurrency ?? DEFAULT_DOWNLOAD_CONCURRENCY, async (entry: SourceEntry): Promise<ParseResult> => {
+      signal?.throwIfAborted();
       const failed = (stage: IndexFailure["stage"], error: unknown): ParseResult => {
         processed += 1;
         const failure = { sourcePath: entry.path, stage, error: failureMessage(error) };
@@ -481,7 +509,10 @@ export class DocumentationSearch {
         const parsed = outcome.results.flatMap((result) => result.parsed ? [result.parsed] : []);
         failures.push(...outcome.results.flatMap((result) => result.failure ? [result.failure] : []));
         if (parsed.some((source) => source.chunks.length)) progress(`Embedding prepared chunks through ${processed}/${changed.length} sources...`);
-        for (const group of groupSources(parsed, EMBEDDING_GROUP_CHUNK_TARGET)) await embedGroup(group);
+        for (const group of groupSources(parsed, EMBEDDING_GROUP_CHUNK_TARGET)) {
+          signal?.throwIfAborted();
+          await embedGroup(group);
+        }
       }
     } finally {
       cache?.close();
@@ -516,12 +547,12 @@ export class DocumentationSearch {
 
   async search(query: string, options: SearchOptions = {}): Promise<SearchResult[]> {
     if (!query.trim()) throw new Error("Search query cannot be empty");
-    const limit = options.limit ?? 10;
-    const threshold = options.threshold ?? 0.3;
-    const maxResultsPerSource = options.maxResultsPerSource ?? 3;
-    if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error("limit must be an integer between 1 and 50");
+    const limit = options.limit ?? DEFAULT_SEARCH_LIMIT;
+    const threshold = options.threshold ?? DEFAULT_SIMILARITY_THRESHOLD;
+    const maxResultsPerSource = options.maxResultsPerSource ?? DEFAULT_MAX_RESULTS_PER_SOURCE;
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_SEARCH_LIMIT) throw new Error(`limit must be an integer between 1 and ${MAX_SEARCH_LIMIT}`);
     if (!Number.isFinite(threshold) || threshold < -1 || threshold > 1) throw new Error("threshold must be a finite number between -1 and 1");
-    if (!Number.isInteger(maxResultsPerSource) || maxResultsPerSource < 1 || maxResultsPerSource > 10) throw new Error("maxResultsPerSource must be an integer between 1 and 10");
+    if (!Number.isInteger(maxResultsPerSource) || maxResultsPerSource < 1 || maxResultsPerSource > MAX_RESULTS_PER_SOURCE) throw new Error(`maxResultsPerSource must be an integer between 1 and ${MAX_RESULTS_PER_SOURCE}`);
     const embedding = await this.embedQuery(query);
     const rerank = Boolean(this.reranker) && (options.rerank ?? false);
     const candidates = this.database.search(query, embedding, options, rerank ? Math.max(limit, RERANK_DEPTH) : limit, threshold, options.deduplicateReleases, maxResultsPerSource);

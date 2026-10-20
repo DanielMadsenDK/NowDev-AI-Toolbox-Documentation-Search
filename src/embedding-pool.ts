@@ -1,14 +1,16 @@
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
-import type { EmbeddingWorkerResponse } from "./embedding-inference.js";
+import type { EmbeddingWorkerRequest, EmbeddingWorkerResponse } from "./embedding-inference.js";
 
 export interface EmbeddingWorkerPoolOptions {
   size: number;
   workerUrl: URL;
   workerData: unknown;
-  /** Workers are terminated after this long without work, releasing their model copies. */
+  /** Workers are shut down after this long without work, releasing their model copies. */
   idleMilliseconds?: number;
+  /** How long a worker may take to release its model after a shutdown request before it is terminated. */
+  shutdownMilliseconds?: number;
 }
 
 interface Job {
@@ -23,9 +25,14 @@ interface PoolWorker {
 }
 
 const DEFAULT_IDLE_MILLISECONDS = 10_000;
+const DEFAULT_SHUTDOWN_MILLISECONDS = 2_000;
 
 function workerError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function disposedError(): Error {
+  return new Error("Embedding worker pool was disposed");
 }
 
 /**
@@ -34,17 +41,25 @@ function workerError(error: unknown): Error {
  * period; the next job starts it again.
  */
 export class EmbeddingWorkerPool {
-  readonly size: number;
+  /** The configured worker count; `size` is the number actually running once started. */
+  readonly capacity: number;
   private readonly options: EmbeddingWorkerPoolOptions;
   private workers: PoolWorker[] = [];
   private starting?: Promise<void>;
   private readonly queue: Job[] = [];
   private nextJobId = 0;
   private idleTimer?: NodeJS.Timeout;
+  // Bumped by dispose(), so a start or replacement that finishes afterwards shuts its workers down instead of adopting them.
+  private generation = 0;
 
   constructor(options: EmbeddingWorkerPoolOptions) {
     this.options = options;
-    this.size = Math.max(1, Math.floor(options.size));
+    this.capacity = Math.max(1, Math.floor(options.size));
+  }
+
+  /** Running workers, or the configured count before the pool has started. */
+  get size(): number {
+    return this.workers.length || this.capacity;
   }
 
   /** Whether the worker script exists; a source checkout run without a build has none. */
@@ -66,7 +81,10 @@ export class EmbeddingWorkerPool {
     });
   }
 
-  /** Starts every worker, rejecting if any fails to load its model. */
+  /**
+   * Starts the workers, rejecting only if the first one fails to load its model. Workers after the first that fail
+   * (usually memory pressure) are left out, and the pool runs with the ones that started.
+   */
   start(): Promise<void> {
     this.starting ??= this.spawnAll().catch((error: unknown) => {
       this.starting = undefined;
@@ -77,25 +95,26 @@ export class EmbeddingWorkerPool {
 
   async dispose(): Promise<void> {
     clearTimeout(this.idleTimer);
+    this.generation += 1;
     const workers = this.workers;
     this.workers = [];
     this.starting = undefined;
-    const disposed = new Error("Embedding worker pool was disposed");
+    const disposed = disposedError();
     for (const job of this.queue.splice(0)) job.reject(disposed);
     for (const entry of workers) entry.job?.reject(disposed);
-    await Promise.all(workers.map((entry) => entry.worker.terminate()));
+    await Promise.all(workers.map((entry) => this.shutdown(entry.worker)));
   }
 
   private async spawnAll(): Promise<void> {
+    const generation = this.generation;
     // The first worker downloads the model into the shared cache if it is missing; starting the rest only after it
     // is ready keeps several workers from writing the same files at once.
     const first = await this.spawn();
-    const rest = await Promise.allSettled(Array.from({ length: this.size - 1 }, () => this.spawn()));
+    const rest = await Promise.allSettled(Array.from({ length: this.capacity - 1 }, () => this.spawn()));
     const started = [first, ...rest.flatMap((result) => result.status === "fulfilled" ? [result.value] : [])];
-    const failure = rest.find((result): result is PromiseRejectedResult => result.status === "rejected");
-    if (failure) {
-      await Promise.all(started.map((worker) => worker.terminate()));
-      throw workerError(failure.reason);
+    if (generation !== this.generation) {
+      await Promise.all(started.map((worker) => this.shutdown(worker)));
+      throw disposedError();
     }
     this.workers = started.map((worker) => this.attach(worker));
   }
@@ -124,6 +143,37 @@ export class EmbeddingWorkerPool {
     });
   }
 
+  /** Asks a worker to release its model session and exit, terminating it if it does not finish in time. */
+  private async shutdown(worker: Worker): Promise<void> {
+    const exited = new Promise<void>((resolve) => worker.once("exit", () => resolve()));
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, this.options.shutdownMilliseconds ?? DEFAULT_SHUTDOWN_MILLISECONDS);
+      timer.unref();
+    });
+    try {
+      worker.postMessage({ shutdown: true } satisfies EmbeddingWorkerRequest);
+    } catch {
+      // A worker that already exited cannot take messages; terminate() below is then a no-op.
+    }
+    await Promise.race([exited, timedOut]);
+    clearTimeout(timer);
+    await worker.terminate();
+  }
+
+  /** Starts a worker to take the place of one that crashed, so the pool keeps its parallelism. */
+  private replace(): void {
+    const generation = this.generation;
+    this.spawn().then((worker) => {
+      if (generation !== this.generation) {
+        void this.shutdown(worker);
+        return;
+      }
+      this.workers.push(this.attach(worker));
+      this.dispatch();
+    }, () => undefined);
+  }
+
   private attach(worker: Worker): PoolWorker {
     const entry: PoolWorker = { worker };
     worker.on("message", (message: EmbeddingWorkerResponse) => {
@@ -131,7 +181,7 @@ export class EmbeddingWorkerPool {
       if (!job || !("id" in message) || message.id !== job.id) return;
       entry.job = undefined;
       worker.unref();
-      if ("error" in message) job.reject(new Error(message.error));
+      if ("error" in message) job.reject(new Error(message.error, message.cause ? { cause: new Error(message.cause) } : undefined));
       else job.resolve(message.data);
       this.dispatch();
     });
@@ -144,6 +194,8 @@ export class EmbeddingWorkerPool {
         // Every worker is gone; fail the backlog and let the next run() start a fresh pool.
         this.starting = undefined;
         for (const job of this.queue.splice(0)) job.reject(error);
+      } else {
+        this.replace();
       }
       this.dispatch();
     };
@@ -161,7 +213,7 @@ export class EmbeddingWorkerPool {
       entry.job = { ...job, id: this.nextJobId++ };
       // A worker with work in flight keeps the process alive so the awaiting caller is not abandoned.
       entry.worker.ref();
-      entry.worker.postMessage({ id: entry.job.id, texts: job.texts });
+      entry.worker.postMessage({ id: entry.job.id, texts: job.texts } satisfies EmbeddingWorkerRequest);
     }
     if (this.workers.length && !this.queue.length && this.workers.every((entry) => !entry.job)) {
       this.idleTimer = setTimeout(() => void this.dispose(), this.options.idleMilliseconds ?? DEFAULT_IDLE_MILLISECONDS);

@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -126,6 +126,22 @@ describe("nowdev-ai-toolbox-documentationsearch CLI", () => {
       expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("search_servicenow_docs");
     } finally {
       await client.close();
+      await removeDirectory(directory);
+    }
+  });
+
+  it("exits on its own when the MCP client closes stdin", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "documentationsearch-mcp-exit-"));
+    try {
+      const server = spawn(process.execPath, [path.resolve("dist/cli-entry.js"), "--data-dir", directory, "--deterministic-embeddings", "mcp"], { stdio: ["pipe", "ignore", "ignore"] });
+      const exited = new Promise<number | null>((resolve) => server.once("exit", resolve));
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      server.stdin.end();
+      const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 5_000).unref());
+      const outcome = await Promise.race([exited, timeout]);
+      if (outcome === "timeout") server.kill();
+      expect(outcome).toBe(0);
+    } finally {
       await removeDirectory(directory);
     }
   });

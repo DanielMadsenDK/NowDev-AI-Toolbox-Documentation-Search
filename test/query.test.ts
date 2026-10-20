@@ -64,3 +64,9 @@ describe("splitIdentifier", () => {
     expect(splitIdentifier("sys_id")).toEqual(["sys", "id"]);
   });
 });
+
+describe("analyzeQuery tokenization", () => {
+  it("keeps words in any script, as the full-text index does", () => {
+    expect(analyzeQuery("Überblick über Zähler").terms).toEqual(["überblick", "über", "zähler"]);
+  });
+});

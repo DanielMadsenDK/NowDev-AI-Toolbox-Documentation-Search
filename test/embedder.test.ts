@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createEmbeddingBatches, DEFAULT_MAX_EMBEDDING_WORKERS, EndpointDocumentEmbeddingProvider, HashEmbeddingProvider, TransformersEmbeddingProvider, truncateEmbeddingText } from "../src/embedder.js";
 import { EmbeddingWorkerPool } from "../src/embedding-pool.js";
 import { DEFAULT_EMBEDDING_PROFILE, EMBEDDING_PROFILES } from "../src/embedding-profiles.js";
+import { TransformersReranker } from "../src/reranker.js";
 
 const fakeWorkerUrl = new URL("./fixtures/fake-embedding-worker.mjs", import.meta.url);
 const disposables: Array<{ dispose(): Promise<void> }> = [];
@@ -171,6 +172,38 @@ describe("EmbeddingWorkerPool", () => {
     await expect(pool({ workerData: { failStartup: true } }).start()).rejects.toThrow("simulated startup failure");
   });
 
+  it("runs with the workers that started when a later one fails to load", async () => {
+    const startups = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+    const workers = pool({ size: 3, workerData: { startups, failStartupFrom: 2 } });
+    await workers.start();
+    expect(workers.size).toBe(2);
+    expect(workers.capacity).toBe(3);
+    expect((await workers.run(["abc"]))[0]).toBe(3);
+  });
+
+  it("shuts down workers whose start finishes after the pool was disposed", async () => {
+    const workers = pool({ size: 2, workerData: { delayMilliseconds: 0 } });
+    const starting = workers.start();
+    await workers.dispose();
+    await expect(starting).rejects.toThrow("disposed");
+    expect((workers as unknown as { workers: unknown[] }).workers).toHaveLength(0);
+  });
+
+  it("replaces a crashed worker while others keep running", async () => {
+    const workers = pool({ size: 2 });
+    await workers.start();
+    await expect(workers.run(["crash"])).rejects.toThrow("exited unexpectedly");
+    await vi.waitFor(() => expect((workers as unknown as { workers: unknown[] }).workers).toHaveLength(2));
+    expect(await Promise.all([workers.run(["a"]), workers.run(["bb"])])).toEqual([expect.any(Float32Array), expect.any(Float32Array)]);
+  });
+
+  it("keeps a worker error's cause, so out-of-memory detection sees it", async () => {
+    const workers = pool();
+    const error = await workers.run(["caused"]).catch((failure: unknown) => failure as Error);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).cause).toMatchObject({ message: "underlying cause" });
+  });
+
   it("shuts down while idle and restarts for the next job", async () => {
     const workers = pool({ idleMilliseconds: 10 });
     await workers.run(["first"]);
@@ -247,6 +280,42 @@ describe("TransformersEmbeddingProvider worker pool", () => {
     expect(provider.metrics.workerFallbacks).toBe(1);
     expect(errors).toHaveBeenCalledWith(expect.stringContaining("worker script is missing"));
     errors.mockRestore();
+  });
+});
+
+describe("TransformersEmbeddingProvider batch token budget", () => {
+  it("shortens a text that alone exceeds the batch token budget instead of rejecting it", async () => {
+    const provider = new TransformersEmbeddingProvider({ dimensions: 4, maxBatchTokens: 30, maxEmbeddingCharacters: 1000, sortByLength: false, workers: 1, documentPrefix: "", queryPrefix: "" });
+    disposables.push(provider);
+    const inProcess = vi.spyOn(provider as unknown as { inferInProcess(texts: string[]): Promise<Float32Array[]> }, "inferInProcess")
+      .mockImplementation(async (texts) => texts.map(() => new Float32Array(4)));
+    await provider.embed(["x".repeat(100)]);
+    expect(inProcess.mock.calls[0]![0][0]).toHaveLength(20);
+    expect(provider.metrics.truncations).toBe(1);
+  });
+});
+
+describe("TransformersReranker", () => {
+  function reranker(logits: number[], columns: number) {
+    const created = new TransformersReranker();
+    const disposed: string[] = [];
+    const tensor = (name: string) => ({ dispose: () => disposed.push(name) });
+    vi.spyOn(created as unknown as { load(): Promise<unknown> }, "load").mockResolvedValue({
+      tokenizer: () => ({ input_ids: tensor("input_ids"), attention_mask: tensor("attention_mask") }),
+      model: async () => ({ logits: { data: Float32Array.from(logits), dims: [logits.length / columns, columns], dispose: () => disposed.push("logits") } }),
+    });
+    return { created, disposed };
+  }
+
+  it("returns single-logit cross-encoder scores unchanged", async () => {
+    const { created, disposed } = reranker([2.5, -1], 1);
+    expect(await created.score("query", ["first", "second"])).toEqual([2.5, -1]);
+    expect(disposed.sort()).toEqual(["attention_mask", "input_ids", "logits"]);
+  });
+
+  it("scores two-class heads as the relevant class's log-odds", async () => {
+    const { created } = reranker([1, 3, 2, -2], 2);
+    expect(await created.score("query", ["relevant", "irrelevant"])).toEqual([2, -4]);
   });
 });
 

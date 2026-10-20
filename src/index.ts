@@ -6,5 +6,6 @@ export * from "./embedding-cache.js";
 export * from "./embedding-profiles.js";
 export * from "./github.js";
 export * from "./database.js";
-export * from "./service-context.js";export * from "./query.js";
+export * from "./service-context.js";
+export * from "./query.js";
 export * from "./reranker.js";

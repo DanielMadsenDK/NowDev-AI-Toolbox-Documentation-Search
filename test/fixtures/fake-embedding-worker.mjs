@@ -1,13 +1,22 @@
 // Deterministic stand-in for src/embedding-worker.ts. Row vectors are [text length, 1, 0, ...]. Texts steer failures:
 // "fail" posts an error, "oom" reports out-of-memory while batched with other texts, and "crash" ends the worker.
 // workerData.counters (a SharedArrayBuffer of three int32s) records [active jobs, peak active jobs, total jobs].
+// workerData.startups (a SharedArrayBuffer of one int32) numbers worker startups; failStartupFrom makes the worker
+// with that startup number, and every later one, fail to load.
 import { parentPort, workerData } from "node:worker_threads";
 
 const dimensions = workerData.dimensions ?? 4;
 const counters = workerData.counters ? new Int32Array(workerData.counters) : undefined;
 if (workerData.failStartup) throw new Error("simulated startup failure");
+const startup = workerData.startups ? Atomics.add(new Int32Array(workerData.startups), 0, 1) : 0;
+if (workerData.failStartupFrom !== undefined && startup >= workerData.failStartupFrom) throw new Error("simulated startup failure");
 
-parentPort.on("message", async ({ id, texts }) => {
+parentPort.on("message", async (message) => {
+  if (message.shutdown) {
+    parentPort.close();
+    return;
+  }
+  const { id, texts } = message;
   if (counters) {
     const active = Atomics.add(counters, 0, 1) + 1;
     Atomics.add(counters, 2, 1);
@@ -22,6 +31,10 @@ parentPort.on("message", async ({ id, texts }) => {
   if (texts.includes("crash")) process.exit(3);
   if (texts.includes("fail")) {
     parentPort.postMessage({ id, error: "simulated failure" });
+    return;
+  }
+  if (texts.includes("caused")) {
+    parentPort.postMessage({ id, error: "simulated failure", cause: "underlying cause" });
     return;
   }
   if (texts.length > 1 && texts.includes("oom")) {

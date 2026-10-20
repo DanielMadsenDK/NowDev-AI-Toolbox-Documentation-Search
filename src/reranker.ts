@@ -10,6 +10,8 @@ export interface Reranker {
   score(query: string, documents: string[]): Promise<number[]>;
   /** Loads the model ahead of the first query. */
   warmUp?(): Promise<void>;
+  /** Releases the model session. */
+  dispose?(): Promise<void>;
 }
 
 export interface TransformersRerankerOptions {
@@ -72,10 +74,28 @@ export class TransformersReranker implements Reranker {
       truncation: true,
       max_length: this.options.maxLength ?? 512,
     });
-    const { logits } = await model(inputs) as { logits: { data: ArrayLike<number>; dims: number[] } };
-    const columns = logits.dims.at(-1) ?? 1;
-    // Single-logit cross-encoders emit one relevance score per pair; two-class heads put "relevant" last.
-    return Array.from({ length: documents.length }, (_, index) => Number(logits.data[index * columns + columns - 1]));
+    try {
+      const { logits } = await model(inputs) as { logits: { data: ArrayLike<number>; dims: number[]; dispose(): void } };
+      try {
+        const columns = logits.dims.at(-1) ?? 1;
+        return Array.from({ length: documents.length }, (_, index) => {
+          const row = index * columns;
+          // Single-logit cross-encoders emit one relevance logit per pair. Two-class heads put "relevant" last, and
+          // the difference of the two logits is the log-odds a sigmoid turns back into the softmax probability.
+          return columns === 1 ? Number(logits.data[row]) : Number(logits.data[row + columns - 1]) - Number(logits.data[row + columns - 2]);
+        });
+      } finally {
+        logits.dispose();
+      }
+    } finally {
+      for (const tensor of Object.values(inputs) as Array<{ dispose?: () => void }>) tensor.dispose?.();
+    }
+  }
+
+  async dispose(): Promise<void> {
+    const loading = this.loading;
+    this.loading = undefined;
+    await loading?.then(({ model }) => model.dispose(), () => undefined);
   }
 }
 

@@ -1,7 +1,7 @@
 import os from "node:os";
-import type { FeatureExtractionPipeline, PreTrainedTokenizer } from "@huggingface/transformers";
+import type { PreTrainedTokenizer } from "@huggingface/transformers";
 import { DEFAULT_DEVICE } from "./config.js";
-import { extractEmbeddings, splitVectors, type EmbeddingWorkerData, type InferenceSettings } from "./embedding-inference.js";
+import { extractEmbeddings, loadExtractor, splitVectors, type EmbeddingWorkerData, type InferenceSettings, type LoadedExtractor } from "./embedding-inference.js";
 import { EmbeddingWorkerPool } from "./embedding-pool.js";
 import { DEFAULT_EMBEDDING_PROFILE, EMBEDDING_PROFILES } from "./embedding-profiles.js";
 
@@ -101,6 +101,11 @@ export const DEFAULT_MAX_EMBEDDING_WORKERS = 8;
 // drove it into 12 GB of swap and cut throughput from ~35 to ~3 chunks per second.
 const WORKER_MEMORY_SHARE = 0.35;
 const DEFAULT_WORKER_MEMORY_MEGABYTES = 1500;
+// Intra-op threads for the in-process CPU session when bulk embedding runs in workers. That session then serves only
+// queries, and giving it every core would contend with the workers whenever a search runs during indexing.
+const QUERY_SESSION_THREADS = 4;
+// Texts tokenized between yields to the event loop, so counting a large pass doesn't stall queries or I/O.
+const TOKEN_COUNT_YIELD_INTERVAL = 1000;
 
 function isOutOfMemoryError(error: unknown): boolean {
   const message = error instanceof Error ? `${error.message} ${error.cause instanceof Error ? error.cause.message : ""}` : String(error);
@@ -109,6 +114,11 @@ function isOutOfMemoryError(error: unknown): boolean {
 
 function estimateTokenCount(text: string): number {
   return Math.max(1, Math.ceil(Buffer.byteLength(text, "utf8") / 2));
+}
+
+/** The longest text whose estimated token count always fits the budget: a UTF-16 code unit is at most 3 UTF-8 bytes. */
+function charactersWithinTokenBudget(maxTokens: number): number {
+  return Number.isFinite(maxTokens) ? Math.max(1, Math.floor(maxTokens * 2 / 3)) : Number.POSITIVE_INFINITY;
 }
 
 function assertNonEmptyTexts(texts: string[]): void {
@@ -175,11 +185,10 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
   readonly metrics: EmbeddingMetrics = { requests: 0, retries: 0, truncations: 0, batchSplits: 0, deviceTransitions: 0, workerFallbacks: 0 };
   private readonly options: TransformersEmbeddingOptions;
   // GPU session for bulk embedding; unused on the CPU.
-  private pipeline?: Promise<FeatureExtractionPipeline>;
+  private pipeline?: Promise<LoadedExtractor>;
   // CPU session for queries, and for bulk embedding that isn't pooled or on a GPU.
-  private cpuPipeline?: Promise<FeatureExtractionPipeline>;
+  private cpuPipeline?: Promise<LoadedExtractor>;
   private tokenizer?: Promise<PreTrainedTokenizer>;
-  private layerNormOperation?: typeof import("@huggingface/transformers").layer_norm;
   private pool?: EmbeddingWorkerPool;
   private poolUnavailable = false;
   // Two lanes so a query embedded during a large in-process bulk pass only waits for the in-flight batch to finish, not the whole pass: bulk work is scheduled one batch at a time, and the drain loop always prefers a queued query over the next bulk batch.
@@ -225,18 +234,14 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
     return { model: this.model, pooling: this.pooling, layerNorm: this.layerNorm, dimensions: this.dimensions };
   }
 
-  private createPipeline(device: EmbeddingDevice): Promise<FeatureExtractionPipeline> {
-    return import("@huggingface/transformers").then(async (transformers) => {
-      if (this.options.cacheDirectory) transformers.env.cacheDir = this.options.cacheDirectory;
-      this.layerNormOperation = transformers.layer_norm;
-      // onnxruntime-node's default intra-op thread count isn't always the full logical core count; on a low-core machine that leaves real CPU throughput on the table for a compute-bound embedding pass. Configurable (this.threads) since host core counts vary.
-      const sessionOptions = device === "cpu" ? { intraOpNumThreads: this.threads } : undefined;
-      return transformers.pipeline("feature-extraction", this.model, { device, dtype: this.dtype, session_options: sessionOptions });
-    });
+  private createPipeline(device: EmbeddingDevice): Promise<LoadedExtractor> {
+    // With pooled workers the CPU session mostly serves queries; without them it does all bulk embedding and gets every thread.
+    const threads = this.workers > 1 ? Math.min(QUERY_SESSION_THREADS, this.threads) : this.threads;
+    return loadExtractor(this.model, { device, dtype: this.dtype, cacheDirectory: this.options.cacheDirectory, threads });
   }
 
   // The in-process session for bulk embedding on the current device.
-  private load(): Promise<FeatureExtractionPipeline> {
+  private load(): Promise<LoadedExtractor> {
     if (this.runtimeDevice === "cpu") return this.loadCpu();
     if (!this.pipeline) {
       const loading = this.createPipeline(this.runtimeDevice);
@@ -249,7 +254,7 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
   }
 
   // Queries always use this session, so a search never loads, waits for, or depends on a GPU.
-  private loadCpu(): Promise<FeatureExtractionPipeline> {
+  private loadCpu(): Promise<LoadedExtractor> {
     if (!this.cpuPipeline) {
       const loading = this.createPipeline("cpu");
       this.cpuPipeline = loading;
@@ -261,6 +266,8 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
   }
 
   private loadTokenizer(): Promise<PreTrainedTokenizer> {
+    // The CPU session, once started, carries the same tokenizer; pooled and GPU indexing otherwise load one on its own.
+    if (this.cpuPipeline) return this.cpuPipeline.then(({ extractor }) => extractor.tokenizer);
     if (!this.tokenizer) {
       const loading = import("@huggingface/transformers").then((transformers) => {
         if (this.options.cacheDirectory) transformers.env.cacheDir = this.options.cacheDirectory;
@@ -276,7 +283,13 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
 
   private async countTokens(texts: string[]): Promise<number[]> {
     const tokenizer = await this.loadTokenizer();
-    return texts.map((text) => tokenizer(text, { truncation: true }).input_ids.dims.at(-1) ?? 1);
+    const counts = new Array<number>(texts.length);
+    for (let index = 0; index < texts.length; index += 1) {
+      if (index && index % TOKEN_COUNT_YIELD_INTERVAL === 0) await new Promise((resolve) => setImmediate(resolve));
+      // encode() returns plain token ids, without building the padded tensors a full tokenizer call allocates.
+      counts[index] = tokenizer.encode(texts[index]!).length;
+    }
+    return counts;
   }
 
   /** The worker pool for bulk CPU embedding, or undefined to embed in-process. */
@@ -289,6 +302,9 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
     try {
       if (!this.pool.available) throw new Error("the embedding worker script is missing; run the built package");
       await this.pool.start();
+      if (this.pool.size < this.pool.capacity) {
+        console.error(`Only ${this.pool.size} of ${this.pool.capacity} embedding workers started; continuing with fewer workers.`);
+      }
       return this.pool;
     } catch (error) {
       // Embedding still works in-process, just without the parallel speed-up.
@@ -300,8 +316,8 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
   }
 
   private async inferInProcess(texts: string[], query = false): Promise<Float32Array[]> {
-    const extractor = await (query ? this.loadCpu() : this.load());
-    return splitVectors(await extractEmbeddings(extractor, this.layerNormOperation!, texts, this.inferenceSettings), texts.length, this.dimensions);
+    const { extractor, layerNorm } = await (query ? this.loadCpu() : this.load());
+    return splitVectors(await extractEmbeddings(extractor, layerNorm, texts, this.inferenceSettings), texts.length, this.dimensions);
   }
 
   private useCpuFallback(error: unknown): void {
@@ -313,7 +329,7 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
     this.metrics.deviceTransitions += 1;
     console.error(`Embedding on ${device} failed (${error instanceof Error ? error.message : String(error)}); continuing on the CPU with the same model and dtype.`);
     // Released without waiting: a wedged GPU can hang its own teardown, and that must not stall the CPU continuation.
-    void gpuPipeline?.then((pipeline) => pipeline.dispose()).catch(() => undefined);
+    void gpuPipeline?.then(({ extractor }) => extractor.dispose()).catch(() => undefined);
   }
 
   // A batch that runs out of memory is halved. Any other failure on a GPU (a lost device, a driver fault, an operator
@@ -365,9 +381,11 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
     assertNonEmptyTexts(texts);
     const vectors = onBatch ? undefined : new Array<Float32Array>(texts.length);
     let completed = 0;
+    // A batch token budget (DirectML) also caps a single text, so a long passage is shortened rather than rejected.
+    const maxCharacters = Math.min(this.maxEmbeddingCharacters, charactersWithinTokenBudget(this.maxBatchTokens));
     const prefixedTexts = texts.map((text) => {
       const value = `${prefix}${text}`;
-      const truncated = truncateEmbeddingText(value, this.maxEmbeddingCharacters);
+      const truncated = truncateEmbeddingText(value, maxCharacters);
       if (truncated.length < value.length) this.metrics.truncations += 1;
       return truncated;
     });
@@ -424,8 +442,16 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
 
   async dispose(): Promise<void> {
     const pool = this.pool;
+    const sessions = [this.pipeline, this.cpuPipeline];
     this.pool = undefined;
-    await pool?.dispose();
+    this.pipeline = undefined;
+    this.cpuPipeline = undefined;
+    this.tokenizer = undefined;
+    // A session that failed to load has nothing to release.
+    await Promise.all([
+      pool?.dispose(),
+      ...sessions.map((session) => session?.then(({ extractor }) => extractor.dispose(), () => undefined)),
+    ]);
   }
 }
 

@@ -13,6 +13,13 @@ interface StoredSource {
 }
 
 const DATABASE_SCHEMA_VERSION = 3;
+// sqlite-vec rejects KNN queries for more neighbours than this.
+const VEC0_MAX_K = 4096;
+// Every table, index, and trigger migrate() creates. An index that has all of them opens without writing.
+const SCHEMA_OBJECTS = [
+  "sources", "documents", "idx_documents_source_chunk", "idx_documents_filters", "idx_documents_source_path", "idx_sources_source_path",
+  "document_embeddings", "documents_fts", "documents_ai", "documents_ad", "documents_au", "document_vectors",
+];
 const RESET_HINT = "Run nowdev-ai-toolbox-documentationsearch reset-index --yes and re-index the documentation.";
 
 export function readStoredEmbeddingProfile(filename: string): string | null {
@@ -191,16 +198,18 @@ export class DocumentationSearchDatabase {
     this.coarseVectorOversample = coarseVectorOversample;
     fs.mkdirSync(path.dirname(filename), { recursive: true });
     this.db = new DatabaseSync(filename, { allowExtension: true, timeout: 5_000 });
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA foreign_keys = ON;
-      PRAGMA synchronous = NORMAL;
-      PRAGMA temp_store = MEMORY;
-      PRAGMA cache_size = -64000;
-      PRAGMA mmap_size = 268435456;
-    `);
-    sqliteVec.load(this.db);
     try {
+      this.db.exec(`
+        PRAGMA journal_mode = WAL;
+        PRAGMA foreign_keys = ON;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA temp_store = MEMORY;
+        PRAGMA cache_size = -64000;
+        PRAGMA mmap_size = 268435456;
+      `);
+      sqliteVec.load(this.db);
+      // Only sqlite-vec is needed; leaving extension loading on would let any SQL run against this handle load one.
+      this.db.enableLoadExtension(false);
       this.migrate();
     } catch (error) {
       this.db.close();
@@ -232,6 +241,17 @@ export class DocumentationSearchDatabase {
     // dimension count cannot be bit-packed) plus the filter columns. Full-precision vectors for re-scoring and for
     // keyword-candidate similarity live in a plain rowid table, where a point lookup costs microseconds.
     const vectorColumn = this.usesBinaryCoarseVectors ? `coarse_embedding bit[${this.dimensions}]` : `embedding float[${this.dimensions}] distance_metric=cosine`;
+    const existing = new Set(scalarRows<string>(this.db.prepare("SELECT name FROM sqlite_master").all()));
+    // A complete index opens without writing, so a search process can start while an indexer holds the write lock.
+    if (storedSchemaVersion && SCHEMA_OBJECTS.every((name) => existing.has(name))) {
+      this.checkVectorLayout();
+      return;
+    }
+    this.transaction(() => this.createSchema(vectorColumn));
+    this.checkVectorLayout();
+  }
+
+  private createSchema(vectorColumn: string): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sources (
         release TEXT NOT NULL,
@@ -252,6 +272,9 @@ export class DocumentationSearchDatabase {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_source_chunk ON documents(release, source_path, chunk_index);
       CREATE INDEX IF NOT EXISTS idx_documents_filters ON documents(release, doc_type, publication, chunk_type, topic_type);
+      -- Document lookups without a release filter by path alone, which the release-first keys above cannot serve.
+      CREATE INDEX IF NOT EXISTS idx_documents_source_path ON documents(source_path, release, chunk_index);
+      CREATE INDEX IF NOT EXISTS idx_sources_source_path ON sources(source_path, release);
       CREATE TABLE IF NOT EXISTS document_embeddings (id INTEGER PRIMARY KEY, embedding BLOB NOT NULL);
       CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
         title, heading, object_name, method_name, context, content,
@@ -281,18 +304,24 @@ export class DocumentationSearchDatabase {
         topic_type text
       );
     `);
-    const vectorSchema = scalar<string>(this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'document_vectors'").get());
-    if (!vectorSchema?.includes(this.usesBinaryCoarseVectors ? "coarse_embedding bit" : "embedding float")) {
-      throw new Error(`Index vector layout does not match ${this.dimensions}-dimensional embeddings. ${RESET_HINT}`);
-    }
+    // FTS5 stores the rank configuration persistently, so it only needs writing when the schema is created.
     this.db.prepare("INSERT INTO documents_fts(documents_fts, rank) VALUES ('rank', 'bm25(10.0, 7.0, 9.0, 9.0, 4.0, 1.0)')").run();
     this.db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('dimensions', ?)").run(String(this.dimensions));
     this.db.prepare("INSERT OR IGNORE INTO settings(key, value) VALUES ('database_schema_version', ?)").run(String(DATABASE_SCHEMA_VERSION));
   }
 
+  private checkVectorLayout(): void {
+    const vectorSchema = scalar<string>(this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'document_vectors'").get());
+    if (!vectorSchema?.includes(this.usesBinaryCoarseVectors ? "coarse_embedding bit" : "embedding float")) {
+      throw new Error(`Index vector layout does not match ${this.dimensions}-dimensional embeddings. ${RESET_HINT}`);
+    }
+  }
+
   close(): void {
     try {
-      // Lets SQLite refresh planner statistics for tables whose contents changed during this connection.
+      // Lets SQLite refresh planner statistics for tables whose contents changed during this connection. Best-effort,
+      // so it gives up at once instead of waiting out the busy timeout while another process holds the write lock.
+      this.db.exec("PRAGMA busy_timeout = 0");
       this.db.exec("PRAGMA optimize");
     } catch {
       // A read-only or busy database cannot be optimized; closing must still succeed.
@@ -312,20 +341,30 @@ export class DocumentationSearchDatabase {
     }
   }
 
+  private setting(key: string): string | null {
+    return scalar<string>(this.statement("SELECT value FROM settings WHERE key = ?").get(key)) ?? null;
+  }
+
+  /** Writes only when the value changes, so reopening an index with the same settings takes no write lock. */
+  private setSetting(key: string, value: string): void {
+    if (this.setting(key) === value) return;
+    this.statement("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+  }
+
   embeddingProfile(): string | null {
-    return scalar<string>(this.statement("SELECT value FROM settings WHERE key = 'embedding_profile'").get()) ?? null;
+    return this.setting("embedding_profile");
   }
 
   setEmbeddingProfile(profile: string): void {
-    this.statement("INSERT INTO settings(key, value) VALUES ('embedding_profile', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(profile);
+    this.setSetting("embedding_profile", profile);
   }
 
   embeddingDtype(): string | null {
-    return scalar<string>(this.statement("SELECT value FROM settings WHERE key = 'embedding_dtype'").get()) ?? null;
+    return this.setting("embedding_dtype");
   }
 
   setEmbeddingDtype(dtype: string): void {
-    this.statement("INSERT INTO settings(key, value) VALUES ('embedding_dtype', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(dtype);
+    this.setSetting("embedding_dtype", dtype);
   }
 
   sourceMap(release: string): Map<string, StoredSource> {
@@ -374,7 +413,7 @@ export class DocumentationSearchDatabase {
         const fallbackContent = source.chunks.find((chunk) => typeof chunk.metadata.full_content === "string")?.metadata.full_content ?? source.chunks.map((chunk) => chunk.content).join("\n\n");
         insertSource.run(release, source.path, source.blobSha, source.contentHash, source.content ?? String(fallbackContent), JSON.stringify(metadata.shared));
       }
-      if (manifest) this.statement("INSERT INTO settings(key, value) VALUES ('manifest', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(manifest));
+      if (manifest) this.setManifest(manifest);
     });
   }
 
@@ -383,6 +422,8 @@ export class DocumentationSearchDatabase {
     this.releaseCache = undefined;
     this.termFrequencies.clear();
     this.vectorIndex = undefined;
+    // A load in flight now reads outdated rows; it stops at its next yield, and the next warmUp() starts afresh.
+    this.vectorIndexLoading = undefined;
   }
 
   /**
@@ -395,13 +436,18 @@ export class DocumentationSearchDatabase {
     if (!this.usesBinaryCoarseVectors || this.vectorIndex) return Promise.resolve();
     if (!this.vectorIndexLoading) {
       const generation = this.writeGeneration;
-      this.vectorIndexLoading = BinaryVectorIndex.load(this.db, this.dimensions)
+      const isStale = () => generation !== this.writeGeneration;
+      const loading: Promise<void> = BinaryVectorIndex.load(this.db, this.dimensions, isStale)
         .then((index) => {
-          if (generation === this.writeGeneration) this.vectorIndex = index;
+          if (!isStale()) this.vectorIndex = index;
+        }, (error: unknown) => {
+          // A load overtaken by a write is not a failure; searches use vec0 until the next warm-up.
+          if (!isStale()) throw error;
         })
         .finally(() => {
-          this.vectorIndexLoading = undefined;
+          if (this.vectorIndexLoading === loading) this.vectorIndexLoading = undefined;
         });
+      this.vectorIndexLoading = loading;
     }
     return this.vectorIndexLoading;
   }
@@ -441,13 +487,13 @@ export class DocumentationSearchDatabase {
       this.semanticStatements.set(mask, statement);
     }
     return this.usesBinaryCoarseVectors
-      ? statement.all(vector, candidates * this.coarseVectorOversample, release, ...parameters, vector, candidates) as unknown as SearchRow[]
-      : statement.all(vector, candidates, release, ...parameters, candidates) as unknown as SearchRow[];
+      ? statement.all(vector, Math.min(candidates * this.coarseVectorOversample, VEC0_MAX_K), release, ...parameters, vector, candidates) as unknown as SearchRow[]
+      : statement.all(vector, Math.min(candidates, VEC0_MAX_K), release, ...parameters, candidates) as unknown as SearchRow[];
   }
 
   private releases(): string[] {
     this.releaseCache ??= scalarRows<string>(this.statement("SELECT DISTINCT release FROM sources ORDER BY release").all());
-    return this.releaseCache;
+    return [...this.releaseCache];
   }
 
   private termFrequency(expression: string): number {
@@ -488,10 +534,18 @@ export class DocumentationSearchDatabase {
     return [...rows.values()].slice(0, candidates);
   }
 
-  private toResult(row: SearchRow, score: number, similarity: number): SearchResult {
-    const stored = this.statement("SELECT d.metadata, s.metadata AS source_metadata FROM documents d LEFT JOIN sources s ON s.release = d.release AND s.source_path = d.source_path WHERE d.id = ?").get(row.id) as { metadata: string; source_metadata: string | null } | undefined;
-    const chunk = rowToChunk({ ...row, metadata: stored?.metadata ?? "{}", source_metadata: stored?.source_metadata ?? null });
-    return { ...chunk, content: row.content.slice(0, 1000), score, similarity };
+  /** Loads the metadata candidate rows leave out, for the final results only, in one query. */
+  private toResults(selected: Array<{ row: SearchRow; score: number; similarity: number }>): SearchResult[] {
+    if (!selected.length) return [];
+    const stored = this.statement(`SELECT d.id, d.metadata, s.metadata AS source_metadata
+      FROM json_each(?) j CROSS JOIN documents d ON d.id = j.value LEFT JOIN sources s ON s.release = d.release AND s.source_path = d.source_path`)
+      .all(JSON.stringify(selected.map(({ row }) => row.id))) as Array<{ id: number; metadata: string; source_metadata: string | null }>;
+    const metadata = new Map(stored.map((item) => [item.id, item]));
+    return selected.map(({ row, score, similarity }) => {
+      const item = metadata.get(row.id);
+      const chunk = rowToChunk({ ...row, metadata: item?.metadata ?? "{}", source_metadata: item?.source_metadata ?? null });
+      return { ...chunk, content: row.content.slice(0, 1000), score, similarity };
+    });
   }
 
   search(query: string, embedding: Float32Array, filters: SearchFilters, limit = 10, threshold = 0.3, deduplicateReleases = false, maxResultsPerSource = 3): SearchResult[] {
@@ -526,7 +580,7 @@ export class DocumentationSearchDatabase {
     const sourceCounts = new Map<string, number>();
     const deduplicationKeys = new Set<string>();
     const fingerprints = new Set<string>();
-    const selected: SearchResult[] = [];
+    const selected: Array<{ row: SearchRow; score: number; similarity: number }> = [];
     for (const { row, score, similarity } of ranked) {
       if (deduplicateReleases) {
         const deduplicationKey = `${row.source_path}\u0000${row.chunk_index}`;
@@ -543,10 +597,10 @@ export class DocumentationSearchDatabase {
       const count = sourceCounts.get(sourceKey) ?? 0;
       if (count >= boundedMaxPerSource) continue;
       sourceCounts.set(sourceKey, count + 1);
-      selected.push(this.toResult(row, score, similarity));
+      selected.push({ row, score, similarity });
       if (selected.length >= boundedLimit) break;
     }
-    return selected;
+    return this.toResults(selected);
   }
 
   getDocument(sourcePath: string, release?: string): DocumentChunk[] {
@@ -580,16 +634,15 @@ export class DocumentationSearchDatabase {
   stats(): { documents: number; chunks: number; releases: string[] } {
     const chunks = scalar<number>(this.statement("SELECT COUNT(*) FROM documents").get())!;
     const documents = scalar<number>(this.statement("SELECT COUNT(*) FROM sources").get())!;
-    const releases = scalarRows<string>(this.statement("SELECT DISTINCT release FROM sources ORDER BY release").all());
-    return { documents, chunks, releases };
+    return { documents, chunks, releases: this.releases() };
   }
 
   setManifest(manifest: IndexManifest): void {
-    this.statement("INSERT INTO settings(key, value) VALUES ('manifest', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(manifest));
+    this.setSetting("manifest", JSON.stringify(manifest));
   }
 
   manifest(): IndexManifest | null {
-    const value = scalar<string>(this.statement("SELECT value FROM settings WHERE key = 'manifest'").get());
+    const value = this.setting("manifest");
     return value ? JSON.parse(value) as IndexManifest : null;
   }
 }

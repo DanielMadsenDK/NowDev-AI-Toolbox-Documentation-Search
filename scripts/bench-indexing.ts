@@ -72,5 +72,5 @@ try {
   console.log(JSON.stringify(report, null, 2));
   if (values.out) fs.writeFileSync(values.out, `${JSON.stringify(report, null, 2)}\n`);
 } finally {
-  context.close();
+  await context.close();
 }

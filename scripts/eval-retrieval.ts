@@ -63,6 +63,7 @@ function percentile(sorted: number[], fraction: number): number {
 }
 
 function summarize(outcomes: QueryOutcome[]) {
+  if (!outcomes.length) return { queries: 0, hit1: 0, hit5: 0, hit10: 0, mrr10: 0, documentMrr10: 0, p50Milliseconds: 0, p95Milliseconds: 0 };
   const hit = (k: number) => outcomes.filter((outcome) => outcome.rank !== null && outcome.rank <= k).length / outcomes.length;
   const mrr = outcomes.reduce((total, outcome) => total + (outcome.rank ? 1 / outcome.rank : 0), 0) / outcomes.length;
   const documentMrr = outcomes.reduce((total, outcome) => total + (outcome.documentRank ? 1 / outcome.documentRank : 0), 0) / outcomes.length;
@@ -80,6 +81,8 @@ function summarize(outcomes: QueryOutcome[]) {
 }
 
 const golden = YAML.parse(fs.readFileSync(values.queries!, "utf8")) as { release?: string; queries: GoldenQuery[] };
+// Releases are stored lowercased, as search() lowercases its release filter.
+const release = golden.release?.toLowerCase();
 const selected = values.filter ? golden.queries.filter((query) => query.id.includes(values.filter!) || query.category === values.filter) : golden.queries;
 const searchOptions = JSON.parse(values["search-options"]!) as SearchOptions;
 const context = new DocumentationSearch({
@@ -92,24 +95,25 @@ const context = new DocumentationSearch({
 // A target missing from the index (page, method, or heading) makes its query unanswerable. That points at a broken
 // golden entry or a chunking bug rather than at ranking: this check found a mistyped path and 89 GlideDateTime methods
 // that a code-fence repair had folded into their neighbours.
+// Without a golden release, a target counts as reachable in any indexed release (a NULL release matches every row).
 const reachable = {
-  source: context.database.db.prepare("SELECT 1 FROM sources WHERE release = ? AND source_path = ?"),
-  method: context.database.db.prepare("SELECT 1 FROM documents WHERE release = ? AND source_path = ? AND lower(method_name) = lower(?) LIMIT 1"),
-  heading: context.database.db.prepare("SELECT 1 FROM documents WHERE release = ? AND source_path = ? AND lower(heading) LIKE '%' || lower(?) || '%' LIMIT 1"),
+  source: context.database.db.prepare("SELECT 1 FROM sources WHERE (?1 IS NULL OR release = ?1) AND source_path = ?2 LIMIT 1"),
+  method: context.database.db.prepare("SELECT 1 FROM documents WHERE (?1 IS NULL OR release = ?1) AND source_path = ?2 AND lower(method_name) = lower(?3) LIMIT 1"),
+  heading: context.database.db.prepare("SELECT 1 FROM documents WHERE (?1 IS NULL OR release = ?1) AND source_path = ?2 AND lower(heading) LIKE '%' || lower(?3) || '%' LIMIT 1"),
 };
 const describe = (target: RelevantTarget) => `${target.path}${target.method ? `#${target.method}` : target.heading ? `#${target.heading}` : ""}`;
 const unreachable = selected.flatMap((item) => item.relevant
-  .filter((target) => !reachable.source.get(golden.release ?? null, target.path)
-    || (target.method && !reachable.method.get(golden.release ?? null, target.path, target.method))
-    || (target.heading && !reachable.heading.get(golden.release ?? null, target.path, target.heading)))
+  .filter((target) => !reachable.source.get(release ?? null, target.path)
+    || (target.method && !reachable.method.get(release ?? null, target.path, target.method))
+    || (target.heading && !reachable.heading.get(release ?? null, target.path, target.heading)))
   .map((target) => `${item.id}: ${describe(target)}`));
 try {
   // Warm-up so model loading does not count toward the first query's latency.
-  await context.search("warm up", { release: golden.release, ...searchOptions });
+  await context.search("warm up", { release, ...searchOptions });
   const outcomes: QueryOutcome[] = [];
   for (const item of selected) {
     const started = performance.now();
-    const results = await context.search(item.query, { release: golden.release, limit: 10, ...searchOptions });
+    const results = await context.search(item.query, { release, limit: 10, ...searchOptions });
     const milliseconds = performance.now() - started;
     outcomes.push({
       id: item.id,
@@ -147,5 +151,5 @@ try {
   }
   if (values.out) fs.writeFileSync(values.out, `${JSON.stringify(report, null, 2)}\n`);
 } finally {
-  context.close();
+  await context.close();
 }

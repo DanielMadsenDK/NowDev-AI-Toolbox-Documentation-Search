@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chunkDocument, MAX_CHUNK_CHARACTERS } from "../src/chunker.js";
+import { chunkDocument, MAX_CHUNK_CHARACTERS, splitChunkText } from "../src/chunker.js";
 
 describe("chunkDocument", () => {
   it("creates focused method lookup chunks", () => {
@@ -386,3 +386,20 @@ Runs an example.
   });
 });
 
+describe("splitChunkText", () => {
+  it("shortens the carried-over overlap rather than cutting a chunk's own text", () => {
+    const words = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => `${prefix}${index}`).join(" ");
+    const body = [words("alpha", 40), words("beta", 40), words("gamma", 40)].join("\n\n");
+    for (const maxCharacters of [300, 400, 456]) {
+      const chunks = splitChunkText(body, maxCharacters);
+      expect(chunks.length).toBeGreaterThan(1);
+      const bodyWords = new Set(body.split(/\s+/));
+      for (const chunk of chunks) {
+        expect(chunk.length).toBeLessThanOrEqual(maxCharacters);
+        // A chunk cut at the budget would end mid-word; overlap may only shorten the repeated text in front of it.
+        expect(bodyWords.has(chunk.split(/\s+/).at(-1)!)).toBe(true);
+      }
+      expect(chunks.at(-1)!.endsWith("gamma39")).toBe(true);
+    }
+  });
+});

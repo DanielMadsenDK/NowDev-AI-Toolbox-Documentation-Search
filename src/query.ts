@@ -110,7 +110,8 @@ function quote(phrase: string): string {
 
 export function analyzeQuery(query: string): QueryAnalysis {
   // Dots separate object and method (GlideRecord.addQuery); parentheses and arguments are noise.
-  const tokens = query.replace(/\([^)]*\)/g, " ").match(/[A-Za-z0-9_]+/g) ?? [];
+  // Letters and digits in any script, matching the full-text index's unicode61 tokenizer.
+  const tokens = query.replace(/\([^)]*\)/g, " ").match(/[\p{L}\p{N}_]+/gu) ?? [];
   const groups: TermGroup[] = [];
   const words = new Set<string>();
   const seen = new Set<string>();

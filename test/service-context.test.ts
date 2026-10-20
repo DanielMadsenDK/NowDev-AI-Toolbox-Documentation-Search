@@ -277,6 +277,30 @@ describe("ServiceContext", () => {
     context.close();
   });
 
+  it("stops an update when its signal is aborted, keeping what was already committed", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-abort-"));
+    temporaryDirectories.push(directory);
+    const source = new FakeSource();
+    const context = new DocumentationSearch({ dataDirectory: directory, embeddingProvider: new HashEmbeddingProvider(32), source });
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled by test"));
+    await expect(context.update({ family: "australia", signal: controller.signal })).rejects.toThrow("cancelled by test");
+    expect(source.downloads).toBe(0);
+    expect(context.status()).toMatchObject({ documents: 0 });
+    await context.close();
+  });
+
+  it("closes once, releasing the embedding provider and reranker", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-close-"));
+    temporaryDirectories.push(directory);
+    const disposed: string[] = [];
+    const embeddings = Object.assign(new HashEmbeddingProvider(32), { dispose: async () => { disposed.push("embeddings"); } });
+    const reranker = { model: "test-reranker", score: async () => [], dispose: async () => { disposed.push("reranker"); } };
+    const context = new DocumentationSearch({ dataDirectory: directory, embeddingProvider: embeddings, reranker });
+    await Promise.all([context.close(), context.close()]);
+    expect(disposed.sort()).toEqual(["embeddings", "reranker"]);
+  });
+
   it("commits successful documents and retries failed documents later", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "servicecontext-partial-"));
     temporaryDirectories.push(directory);

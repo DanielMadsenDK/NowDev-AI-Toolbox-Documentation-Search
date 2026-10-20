@@ -4,7 +4,7 @@
 
 ## Requirements
 
-- Node.js 22.13 or newer
+- Node.js 22.13 or newer on an even-numbered (LTS) release line: 22, 24, or 26+
 - Internet access during initial documentation and model download
 - Several GB of free cache space for a full family; size varies by release and embedding profile. The embedding cache adds roughly 1 GB per 700,000 distinct passages with the default profile
 
@@ -120,10 +120,10 @@ const results = await documentationSearch.search("GlideRecord pagination", {
   limit: 10,
 });
 
-documentationSearch.close();
+await documentationSearch.close();
 ```
 
-`DocumentationSearch` accepts a custom `EmbeddingProvider`, allowing hosted or organization-specific models without changing storage or ranking. It also accepts `embeddingEndpoint`, `embeddingEndpointModel`, and `embeddingEndpointApiKey` options to offload document embedding while retaining local query embedding. `embeddingThreads` and `embeddingWorkers` set the CPU embedding budget, and `embeddingCache: false` turns off the embedding cache. Changing embedding dimensions requires a separate data directory or rebuilding the index.
+`DocumentationSearch` accepts a custom `EmbeddingProvider`, allowing hosted or organization-specific models without changing storage or ranking. It also accepts `embeddingEndpoint`, `embeddingEndpointModel`, and `embeddingEndpointApiKey` options to offload document embedding while retaining local query embedding. `embeddingThreads` and `embeddingWorkers` set the CPU embedding budget, and `embeddingCache: false` turns off the embedding cache. `update` takes an `AbortSignal` as `signal` to stop between documents, and `close()` resolves once the embedding and reranker models are released. Changing embedding dimensions requires a separate data directory or rebuilding the index.
 
 ## Retrieval benchmark
 

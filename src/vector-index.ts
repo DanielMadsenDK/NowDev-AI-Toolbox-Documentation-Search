@@ -41,7 +41,8 @@ export class BinaryVectorIndex {
     return this.ids.length;
   }
 
-  static async load(db: DatabaseSync, dimensions: number): Promise<BinaryVectorIndex> {
+  /** `isStale` is checked whenever the load yields; once it returns true the load stops and rejects. */
+  static async load(db: DatabaseSync, dimensions: number, isStale: () => boolean = () => false): Promise<BinaryVectorIndex> {
     const words = Math.ceil(dimensions / 32);
     const bytes = dimensions / 8;
     const count = Number((db.prepare("SELECT count(*) AS count FROM documents").get() as { count: number | bigint }).count);
@@ -61,7 +62,10 @@ export class BinaryVectorIndex {
       ids[row] = id;
       rowOfId[id] = row;
       row += 1;
-      if (row % LOAD_YIELD_INTERVAL === 0) await new Promise((resolve) => setImmediate(resolve));
+      if (row % LOAD_YIELD_INTERVAL === 0) {
+        await new Promise((resolve) => setImmediate(resolve));
+        if (isStale()) throw new Error("The index changed while its vectors were loading");
+      }
     }
     const attributes = FILTER_KEYS.map(() => new Uint16Array(row).fill(MISSING));
     const dictionaries = FILTER_KEYS.map(() => new Map<string, number>());

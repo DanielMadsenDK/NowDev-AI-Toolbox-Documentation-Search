@@ -2,13 +2,19 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { API_REFERENCE_PREFIXES, TOP_LEVEL_API_PATH } from "./config.js";
+import type { DocumentationArea } from "./types.js";
+
+export type { DocumentationArea } from "./types.js";
 
 const OWNER = "ServiceNow";
 const REPOSITORY = "ServiceNowDocs";
 const DEFAULT_REPOSITORY_URL = `https://github.com/${OWNER}/${REPOSITORY}.git`;
 const execFileAsync = promisify(execFile);
-
-export type DocumentationArea = "all-docs" | "scripting" | "server" | "client" | "scripts";
+// Longest wait honoured from a Retry-After header or a rate-limit reset; a longer wait fails the request instead.
+const MAX_RETRY_DELAY_MILLISECONDS = 60_000;
+// Generous enough for the one-time shallow clone of the full repository on a slow connection.
+const DEFAULT_GIT_TIMEOUT_MILLISECONDS = 30 * 60_000;
 
 export interface SourceEntry {
   path: string;
@@ -33,20 +39,18 @@ export interface GitHubDocumentationSourceOptions {
   onRetry?: (message: string) => void;
   repositoryDirectory?: string;
   repositoryUrl?: string;
+  /** Kills a git command that runs longer than this (default: 30 minutes). */
+  gitTimeoutMilliseconds?: number;
 }
 
 function included(sourcePath: string, area: DocumentationArea): boolean {
   if (!sourcePath.startsWith("markdown/") || !sourcePath.endsWith(".md") || path.posix.basename(sourcePath) === "index.md") return false;
   if (area === "all-docs") return true;
-  const topLevelApi = /^markdown\/api-reference\/[^/]+\.md$/.test(sourcePath);
-  if (area === "server") return sourcePath.startsWith("markdown/api-reference/server-api-reference/");
-  if (area === "client") return topLevelApi || sourcePath.startsWith("markdown/api-reference/cllent-mobile-api-reference/");
-  if (area === "scripts") return sourcePath.startsWith("markdown/api-reference/scripts/");
-  return topLevelApi || [
-    "markdown/api-reference/server-api-reference/",
-    "markdown/api-reference/cllent-mobile-api-reference/",
-    "markdown/api-reference/scripts/",
-  ].some((prefix) => sourcePath.startsWith(prefix));
+  const topLevelApi = TOP_LEVEL_API_PATH.test(sourcePath);
+  if (area === "server") return sourcePath.startsWith(API_REFERENCE_PREFIXES.server);
+  if (area === "client") return topLevelApi || sourcePath.startsWith(API_REFERENCE_PREFIXES.clientMobile);
+  if (area === "scripts") return sourcePath.startsWith(API_REFERENCE_PREFIXES.scripts);
+  return topLevelApi || [API_REFERENCE_PREFIXES.server, API_REFERENCE_PREFIXES.clientMobile, API_REFERENCE_PREFIXES.scripts].some((prefix) => sourcePath.startsWith(prefix));
 }
 
 function errorDetail(error: unknown): string {
@@ -55,10 +59,40 @@ function errorDetail(error: unknown): string {
   return `${error.message}${cause}`;
 }
 
-function retryDelay(response: Response | undefined, attempt: number, baseMilliseconds: number): number {
-  const retryAfter = response?.headers.get("retry-after");
-  if (retryAfter && /^\d+$/.test(retryAfter)) return Number(retryAfter) * 1_000;
-  return Math.min(baseMilliseconds * 2 ** (attempt - 1), 8_000);
+/** GitHub reports an exhausted primary rate limit as 403 (or 429) with no remaining requests. */
+function isRateLimited(response: Response): boolean {
+  return (response.status === 403 || response.status === 429) && response.headers.get("x-ratelimit-remaining") === "0";
+}
+
+function isRetryable(response: Response): boolean {
+  return response.status === 408 || response.status === 429 || response.status >= 500 || isRateLimited(response);
+}
+
+/** The wait a response asks for, from Retry-After (seconds or an HTTP date) or a rate-limit reset time. */
+function requestedDelay(response: Response | undefined): number | undefined {
+  const retryAfter = response?.headers.get("retry-after")?.trim();
+  if (retryAfter) {
+    if (/^\d+$/.test(retryAfter)) return Number(retryAfter) * 1_000;
+    const date = Date.parse(retryAfter);
+    if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
+  }
+  const reset = response && isRateLimited(response) ? response.headers.get("x-ratelimit-reset") : null;
+  if (reset && /^\d+$/.test(reset)) return Math.max(0, Number(reset) * 1_000 - Date.now());
+  return undefined;
+}
+
+function backoffDelay(attempt: number, baseMilliseconds: number): number {
+  // Full jitter keeps concurrent downloads that failed together from retrying in lockstep.
+  return Math.round(Math.random() * Math.min(baseMilliseconds * 2 ** (attempt - 1), 8_000));
+}
+
+/** Resolves a repository-relative path, rejecting one that would leave the repository directory. */
+function repositoryFile(repository: string, sourcePath: string): string {
+  const normalized = path.posix.normalize(sourcePath);
+  if (normalized !== sourcePath || normalized.startsWith("../") || path.posix.isAbsolute(normalized)) {
+    throw new Error(`Invalid documentation path: ${sourcePath}`);
+  }
+  return path.join(repository, ...normalized.split("/"));
 }
 
 export class GitHubDocumentationSource {
@@ -68,6 +102,7 @@ export class GitHubDocumentationSource {
   private readonly onRetry: (message: string) => void;
   private readonly repositoryDirectory?: string;
   private readonly repositoryUrl: string;
+  private readonly gitTimeoutMilliseconds: number;
   private activeRepository?: string;
 
   constructor(options: GitHubDocumentationSourceOptions = {}) {
@@ -77,10 +112,17 @@ export class GitHubDocumentationSource {
     this.onRetry = options.onRetry ?? ((message) => console.error(message));
     this.repositoryDirectory = options.repositoryDirectory;
     this.repositoryUrl = options.repositoryUrl ?? DEFAULT_REPOSITORY_URL;
+    this.gitTimeoutMilliseconds = Math.max(1, options.gitTimeoutMilliseconds ?? DEFAULT_GIT_TIMEOUT_MILLISECONDS);
   }
 
   private async git(args: string[], cwd?: string): Promise<string> {
-    const result = await execFileAsync("git", args, { cwd, maxBuffer: 50 * 1024 * 1024 });
+    const result = await execFileAsync("git", args, {
+      cwd,
+      maxBuffer: 50 * 1024 * 1024,
+      timeout: this.gitTimeoutMilliseconds,
+      // The repository is public; a credential prompt would only hang a non-interactive run.
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
     return result.stdout;
   }
 
@@ -110,9 +152,10 @@ export class GitHubDocumentationSource {
   }
 
   private async discoverFromRepository(area: DocumentationArea): Promise<SourceTree> {
-    const output = await this.git(["ls-tree", "-r", "HEAD"], this.activeRepository);
-    const entries = output.split("\n").flatMap((line) => {
-      const match = line.match(/^\d+\s+blob\s+([0-9a-f]+)\t(.+)$/);
+    // -z keeps paths verbatim; without it git quotes and escapes non-ASCII paths.
+    const output = await this.git(["ls-tree", "-r", "-z", "HEAD"], this.activeRepository);
+    const entries = output.split("\0").flatMap((record) => {
+      const match = record.match(/^\d+ blob ([0-9a-f]+)\t(.+)$/s);
       if (!match || !included(match[2]!, area)) return [];
       return [{ path: match[2]!, blobSha: match[1]! }];
     }).sort((left, right) => left.path.localeCompare(right.path));
@@ -120,7 +163,8 @@ export class GitHubDocumentationSource {
     return { commit, entries };
   }
 
-  private async checkedFetch(url: string, label: string): Promise<Response> {
+  /** Fetches a URL and reads its body, retrying transient failures, including ones that happen while reading the body. */
+  private async checkedFetch<T>(url: string, label: string, read: (response: Response) => Promise<T>): Promise<T> {
     let lastFailure = "unknown failure";
     let attemptsUsed = 0;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
@@ -133,16 +177,24 @@ export class GitHubDocumentationSource {
             "User-Agent": "nowdev-ai-toolbox-documentationsearch",
             ...(process.env.GITHUB_TOKEN ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}),
           },
+          // Covers reading the body too, so a stalled transfer is retried like a failed request.
           signal: AbortSignal.timeout(this.timeoutMilliseconds),
         });
-        if (response.ok) return response;
-        lastFailure = `${response.status} ${response.statusText}`;
-        if (response.status !== 408 && response.status !== 429 && response.status < 500) break;
+        if (response.ok) return await read(response);
+        lastFailure = `${response.status} ${response.statusText}${isRateLimited(response) ? " (rate limit exceeded; set GITHUB_TOKEN for a higher limit)" : ""}`;
+        // An unread body holds its pooled connection open.
+        await response.body?.cancel().catch(() => undefined);
+        if (!isRetryable(response)) break;
       } catch (error) {
         lastFailure = errorDetail(error);
       }
       if (attempt < this.maxAttempts) {
-        const delay = retryDelay(response, attempt, this.retryBaseMilliseconds);
+        const requested = requestedDelay(response);
+        if (requested !== undefined && requested > MAX_RETRY_DELAY_MILLISECONDS) {
+          lastFailure += `; the server asked to wait ${Math.ceil(requested / 1_000)}s`;
+          break;
+        }
+        const delay = requested ?? backoffDelay(attempt, this.retryBaseMilliseconds);
         this.onRetry(`GitHub request failed for ${label} (${lastFailure}); retrying ${attempt + 1}/${this.maxAttempts} in ${delay}ms...`);
         if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
       }
@@ -160,8 +212,7 @@ export class GitHubDocumentationSource {
         this.onRetry(`Shallow Git synchronization failed (${errorDetail(error)}); falling back to GitHub API downloads...`);
       }
     }
-    const response = await this.checkedFetch(`https://api.github.com/repos/${OWNER}/${REPOSITORY}/git/trees/${encodeURIComponent(branch)}?recursive=1`, `branch '${branch}'`);
-    const data = await response.json() as GitTreeResponse;
+    const data = await this.checkedFetch(`https://api.github.com/repos/${OWNER}/${REPOSITORY}/git/trees/${encodeURIComponent(branch)}?recursive=1`, `branch '${branch}'`, (response) => response.json() as Promise<GitTreeResponse>);
     if (data.truncated) throw new Error(`GitHub returned a truncated tree for branch '${branch}'`);
     return {
       commit: data.sha,
@@ -175,9 +226,9 @@ export class GitHubDocumentationSource {
   async download(branch: string, entry: SourceEntry): Promise<string> {
     if (this.activeRepository) {
       if (!included(entry.path, "all-docs")) throw new Error(`Invalid documentation path: ${entry.path}`);
-      return fs.readFile(path.join(this.activeRepository, entry.path), "utf8");
+      return fs.readFile(repositoryFile(this.activeRepository, entry.path), "utf8");
     }
     const url = `https://raw.githubusercontent.com/${OWNER}/${REPOSITORY}/${encodeURIComponent(branch)}/${entry.path.split("/").map(encodeURIComponent).join("/")}`;
-    return (await this.checkedFetch(url, entry.path)).text();
+    return this.checkedFetch(url, entry.path, (response) => response.text());
   }
 }
